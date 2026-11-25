@@ -12,81 +12,53 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.UUID
 
-/** Dialogs for creating, editing and deleting saved SMB connections. */
+/**
+ * Simple dialog-based server adder for first-time setup.
+ * Can later be replaced with a full Compose form.
+ */
 object AddServerHelper {
 
-    fun showAddDialog(context: Context, onAdded: () -> Unit) = showEditor(context, null, onAdded)
-
-    fun showServerOptions(context: Context, server: SmbServer, onChanged: () -> Unit) {
-        AlertDialog.Builder(context)
-            .setTitle(server.name)
-            .setItems(arrayOf("Edit connection", "Delete connection")) { _, which ->
-                when (which) {
-                    0 -> showEditor(context, server, onChanged)
-                    1 -> AlertDialog.Builder(context)
-                        .setTitle("Delete ${server.name}?")
-                        .setMessage("This only removes the saved connection. Files on the server will not be deleted.")
-                        .setPositiveButton("Delete") { _, _ ->
-                            CoroutineScope(Dispatchers.Main).launch {
-                                HaminaApp.instance.serverRepository.deleteServer(server.id)
-                                Toast.makeText(context, "Connection deleted", Toast.LENGTH_SHORT).show()
-                                onChanged()
-                            }
-                        }
-                        .setNegativeButton("Cancel", null)
-                        .show()
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun showEditor(context: Context, existing: SmbServer?, onSaved: () -> Unit) {
+    fun showAddDialog(context: Context, onAdded: () -> Unit) {
         val layout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 24, 48, 8)
         }
 
-        fun field(hint: String, value: String = ""): EditText = EditText(context).apply {
-            this.hint = hint
-            setText(value)
-            setSingleLine()
-            layout.addView(this)
+        fun field(hint: String, default: String = ""): EditText {
+            return EditText(context).apply {
+                this.hint = hint
+                setText(default)
+                setSingleLine()
+                layout.addView(this)
+            }
         }
 
-        val name = field("Display name", existing?.name ?: "My PC")
-        val host = field("IP or hostname", existing?.host ?: "192.168.1.")
-        val share = field("Share name", existing?.share ?: "Videos")
-        val user = field("Username (optional)", existing?.username.orEmpty())
-        val pass = field("Password (optional)", existing?.password.orEmpty())
-        val domain = field("Domain (optional)", existing?.domain.orEmpty())
+        val name = field("Display name", "My PC")
+        val host = field("IP or hostname", "192.168.1.")
+        val share = field("Share name", "Videos")
+        val user = field("Username (optional)")
+        val pass = field("Password (optional)")
 
         AlertDialog.Builder(context)
-            .setTitle(if (existing == null) "Add SMB Server" else "Edit SMB Server")
+            .setTitle("Add SMB Server")
             .setView(layout)
             .setPositiveButton("Save") { _, _ ->
-                val hostValue = host.text.toString().trim()
-                val shareValue = share.text.toString().trim()
-                if (hostValue.isBlank() || shareValue.isBlank()) {
+                val server = SmbServer(
+                    id = UUID.randomUUID().toString(),
+                    name = name.text.toString().ifBlank { "Server" },
+                    host = host.text.toString().trim(),
+                    share = share.text.toString().trim(),
+                    username = user.text.toString().trim(),
+                    password = pass.text.toString()
+                )
+                if (server.host.isBlank() || server.share.isBlank()) {
                     Toast.makeText(context, "Host and Share are required", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
-                val server = SmbServer(
-                    id = existing?.id ?: UUID.randomUUID().toString(),
-                    name = name.text.toString().trim().ifBlank { "Server" },
-                    host = hostValue,
-                    share = shareValue,
-                    username = user.text.toString().trim(),
-                    password = pass.text.toString(),
-                    domain = domain.text.toString().trim(),
-                    port = existing?.port ?: 445,
-                    isFavorite = existing?.isFavorite ?: false
-                )
                 CoroutineScope(Dispatchers.Main).launch {
-                    if (existing == null) HaminaApp.instance.serverRepository.addServer(server)
-                    else HaminaApp.instance.serverRepository.updateServer(server)
-                    Toast.makeText(context, if (existing == null) "Server added" else "Server updated", Toast.LENGTH_SHORT).show()
-                    onSaved()
+                    HaminaApp.instance.serverRepository.addServer(server)
+                    Toast.makeText(context, "Server added", Toast.LENGTH_SHORT).show()
+                    onAdded()
                 }
             }
             .setNegativeButton("Cancel", null)

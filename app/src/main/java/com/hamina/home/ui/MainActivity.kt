@@ -70,6 +70,10 @@ class MainActivity : ComponentActivity() {
         var errorMessage by remember { mutableStateOf<String?>(null) }
         var viewMode by remember { mutableStateOf(ViewMode.LIST) }
         var sortMode by remember { mutableStateOf(SortMode.NAME_ASC) }
+        // null = form hidden; non-null existing server = edit; use a sentinel for "add"
+        var serverFormTarget by remember { mutableStateOf<SmbServer?>(null) }
+        var showServerForm by remember { mutableStateOf(false) }
+        var isEditMode by remember { mutableStateOf(false) }
 
         // Load servers & settings
         LaunchedEffect(Unit) {
@@ -80,6 +84,16 @@ class MainActivity : ComponentActivity() {
         }
         LaunchedEffect(Unit) {
             app.settingsRepository.sortMode.collect { sortMode = it }
+        }
+
+        // Full-screen add/edit form (TV-friendly, all fields focusable)
+        if (showServerForm) {
+            AddServerScreen(
+                existing = if (isEditMode) serverFormTarget else null,
+                onDismiss = { showServerForm = false },
+                onSaved = { showServerForm = false }
+            )
+            return
         }
 
         fun loadFolder(server: SmbServer, path: String, force: Boolean = false) {
@@ -245,7 +259,11 @@ class MainActivity : ComponentActivity() {
                             color = Color(0xFF66BB6A),
                             fontSize = 16.sp,
                             modifier = Modifier
-                                .clickable { AddServerHelper.showAddDialog(this@MainActivity) { } }
+                                .clickable {
+                                    isEditMode = false
+                                    serverFormTarget = null
+                                    showServerForm = true
+                                }
                                 .padding(8.dp)
                         )
                     }
@@ -303,7 +321,9 @@ class MainActivity : ComponentActivity() {
                                             loadFolder(server, "")
                                         },
                                         onLongClick = {
-                                            AddServerHelper.showServerOptions(this@MainActivity, server) { }
+                                            isEditMode = true
+                                            serverFormTarget = server
+                                            showServerForm = true
                                         }
                                     )
                                 }

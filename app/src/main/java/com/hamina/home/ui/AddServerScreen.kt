@@ -51,7 +51,7 @@ fun AddServerScreen(
 
     var name by remember { mutableStateOf(existing?.name ?: "My PC") }
     var host by remember { mutableStateOf(existing?.host ?: "192.168.1.") }
-    var share by remember { mutableStateOf(existing?.share ?: "Videos") }
+    var share by remember { mutableStateOf(existing?.share.orEmpty()) }
     var username by remember { mutableStateOf(existing?.username.orEmpty()) }
     var password by remember { mutableStateOf(existing?.password.orEmpty()) }
     var domain by remember { mutableStateOf(existing?.domain.orEmpty()) }
@@ -75,9 +75,9 @@ fun AddServerScreen(
 
     fun save() {
         val hostValue = host.trim()
-        val shareValue = share.trim()
-        if (hostValue.isBlank() || shareValue.isBlank()) {
-            Toast.makeText(context, "Host and Share are required", Toast.LENGTH_SHORT).show()
+        val shareValue = share.trim() // optional: empty = list all shares from root
+        if (hostValue.isBlank()) {
+            Toast.makeText(context, "IP / hostname is required", Toast.LENGTH_SHORT).show()
             return
         }
         val portValue = port.trim().toIntOrNull() ?: 445
@@ -153,10 +153,11 @@ fun AddServerScreen(
             )
             Spacer(Modifier.height(14.dp))
             TvTextField(
-                label = "Share name *",
+                label = "Share name (optional – leave empty for all shares)",
                 value = share,
                 onValueChange = { share = it },
                 focusRequester = focusShare
+                // empty share → browse all shares on server
             )
             Spacer(Modifier.height(14.dp))
             TvTextField(

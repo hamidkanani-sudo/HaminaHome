@@ -56,27 +56,53 @@ class SmbManager(
                 }
             }
 
-            val share = connectShare(server)
-                ?: return@withContext Result.failure(Exception("Could not connect to ${server.host}"))
+            // No share configured → show list of shares at server root
+            if (server.share.isBlank() && path.trim('/').isEmpty()) {
+                val shares = listServerShares(server)
+                if (shares.isEmpty()) {
+                    return@withContext Result.failure(
+                        Exception("No shares found. Enter a Share name when adding the server, or check permissions.")
+                    )
+                }
+                cacheManager.saveFolderListing(server.id, path, shares)
+                return@withContext Result.success(shares)
+            }
+
+            val resolved = resolveShareAndPath(server, path)
+                ?: return@withContext Result.failure(Exception("Could not resolve share for path: $path"))
+            val (shareName, remotePath) = resolved
+
+            val share = connectShare(server, shareName)
+                ?: return@withContext Result.failure(Exception("Could not connect to ${server.host}/$shareName"))
 
             // استفاده از use برای اطمینان از بسته شدن DiskShare
             share.use { diskShare ->
-                val remotePath = path.trimStart('/').replace('\\', '/')
                 val files = diskShare.list(remotePath)
 
                 val items = files
-                    .filter { it.fileName != "." && it.fileName != ".." }
+                    .filter { it.fileName != "." && it.fileName != ".."
+                        && !it.fileName.startsWith(".") }
                     .map { f ->
-                        val fullPath = if (remotePath.isEmpty()) f.fileName
-                                       else "$remotePath/${f.fileName}"
-                        val isDir = f.fileAttributes.toInt() and 0x10 != 0
+                        val isDir = f.fileAttributes.contains(
+                            com.hierynomus.msfscc.FileAttributes.FILE_ATTRIBUTE_DIRECTORY
+                        )
+                        val childPath = when {
+                            server.share.isBlank() && remotePath.isEmpty() ->
+                                "$shareName/${f.fileName}"
+                            server.share.isBlank() ->
+                                "$shareName/$remotePath/${f.fileName}".replace("//", "/")
+                            remotePath.isEmpty() -> f.fileName
+                            else -> "$remotePath/${f.fileName}"
+                        }.replace("//", "/")
                         MediaItem(
-                            id = UUID.nameUUIDFromBytes("${server.id}|$fullPath".toByteArray()).toString(),
+                            id = UUID.randomUUID().toString(),
                             name = f.fileName,
-                            path = fullPath,
+                            path = childPath,
                             isDirectory = isDir,
                             size = if (isDir) 0L else f.endOfFile,
-                            lastModified = f.lastWriteTime.toEpochMillis(),
+                            lastModified = try {
+                                f.lastWriteTime.toEpochMillis()
+                            } catch (_: Exception) { 0L },
                             serverId = server.id,
                             mimeType = if (isDir) null else guessMime(f.fileName)
                         )
@@ -95,12 +121,14 @@ class SmbManager(
     suspend fun openFileStream(server: SmbServer, path: String): Result<java.io.InputStream> =
         withContext(Dispatchers.IO) {
             try {
-                val share = connectShare(server)
+                val resolved = resolveShareAndPath(server, path)
+                    ?: return@withContext Result.failure(Exception("No connection"))
+                val (shareName, cleanPath) = resolved
+                val share = connectShare(server, shareName)
                     ?: return@withContext Result.failure(Exception("No connection"))
 
-                // توجه: inputStream باید تا زمان خواندن باز بماند، بنابراین نمی‌توان از use استفاده کرد
-                val cleanPath = path.trimStart('/').replace('\\', '/')
                 val file = share.openFile(
+                    cleanPath,
                     cleanPath,
                     EnumSet.of(AccessMask.GENERIC_READ),
                     null,
@@ -119,10 +147,13 @@ class SmbManager(
     suspend fun rename(server: SmbServer, oldPath: String, newName: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             try {
-                val share = connectShare(server)
+                val resolved = resolveShareAndPath(server, oldPath)
+                    ?: return@withContext Result.failure(Exception("No connection"))
+                val (shareName, relPath) = resolved
+                val share = connectShare(server, shareName)
                     ?: return@withContext Result.failure(Exception("No connection"))
 
-                val cleanOld = oldPath.trimStart('/').replace('/', '\\')
+                val cleanOld = relPath.replace('/', '\\')
                 val parent = cleanOld.substringBeforeLast('\\', "")
                 val newPath = if (parent.isEmpty()) newName else "$parent\\$newName"
 
@@ -159,9 +190,12 @@ class SmbManager(
     suspend fun delete(server: SmbServer, path: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             try {
-                val share = connectShare(server)
+                val resolved = resolveShareAndPath(server, path)
                     ?: return@withContext Result.failure(Exception("No connection"))
-                val clean = path.trimStart('/')
+                val (shareName, relPath) = resolved
+                val share = connectShare(server, shareName)
+                    ?: return@withContext Result.failure(Exception("No connection"))
+                val clean = relPath
                 try {
                     share.rm(clean)
                 } catch (_: Exception) {

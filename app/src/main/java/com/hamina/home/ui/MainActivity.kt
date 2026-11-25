@@ -8,6 +8,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.combinedClickable
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
@@ -19,7 +20,13 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -222,14 +229,33 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(Modifier.weight(1f))
                 Text(
-                    text = if (viewMode == ViewMode.LIST) "View: List" else "View: Grid",
+                    text = if (viewMode == ViewMode.LIST) "View: List  (OK to switch)" else "View: Grid  (OK to switch)",
                     color = Color(0xFF90CAF9),
-                    fontSize = 13.sp
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .focusable()
+                        .clickable {
+                            val next = if (viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST
+                            viewMode = next
+                            lifecycleScope.launch { app.settingsRepository.setViewMode(next) }
+                        }
+                        .padding(vertical = 6.dp)
                 )
                 Text(
-                    text = "Sort: ${sortMode.name.replace('_', ' ').lowercase()}",
+                    text = "Sort: ${sortMode.name.replace('_', ' ').lowercase()}  (OK to change)",
                     color = Color(0xFF90CAF9),
-                    fontSize = 13.sp
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .focusable()
+                        .clickable {
+                            val modes = SortMode.values()
+                            val idx = modes.indexOf(sortMode)
+                            val next = modes[(idx + 1) % modes.size]
+                            sortMode = next
+                            items = sortItems(items, next)
+                            lifecycleScope.launch { app.settingsRepository.setSortMode(next) }
+                        }
+                        .padding(vertical = 6.dp)
                 )
             }
 
@@ -310,7 +336,7 @@ class MainActivity : ComponentActivity() {
                                 itemsIndexed(servers) { index, server ->
                                     FocusableRow(
                                         text = "▶  ${server.name}",
-                                        subText = "${server.host} / ${server.share}",
+                                        subText = if (server.share.isBlank()) "${server.host}  (all shares)" else "${server.host} / ${server.share}",
                                         isSelected = selectedIndex == index,
                                         onFocus = {
                                             selectedIndex = index
@@ -372,10 +398,27 @@ class MainActivity : ComponentActivity() {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .focusable()
+                .onFocusChanged { if (it.isFocused) onFocus() }
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyUp) {
+                        val code = event.nativeKeyEvent.keyCode
+                        when (code) {
+                            AndroidKeyEvent.KEYCODE_DPAD_CENTER,
+                            AndroidKeyEvent.KEYCODE_ENTER -> {
+                                onClick(); true
+                            }
+                            AndroidKeyEvent.KEYCODE_MENU,
+                            AndroidKeyEvent.KEYCODE_INFO -> {
+                                onLongClick(); true
+                            }
+                            else -> false
+                        }
+                    } else false
+                }
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .background(bg)
                 .border(2.dp, borderColor)
-                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-                .onFocusChanged { if (it.isFocused) onFocus() }
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
             Text(

@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import java.util.EnumSet
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 class SmbManager(
     private val context: Context,
@@ -27,8 +28,8 @@ class SmbManager(
 
     private val client: SMBClient by lazy {
         val config = SmbConfig.builder()
-            .withTimeout(15_000)
-            .withSoTimeout(30_000)
+            .withTimeout(15, TimeUnit.SECONDS)
+            .withSoTimeout(30, TimeUnit.SECONDS)
             .withDfsEnabled(false)
             .build()
         SMBClient(config)

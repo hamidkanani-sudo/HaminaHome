@@ -20,10 +20,6 @@ import java.util.EnumSet
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * High-level SMB manager optimized for Android TV media browsing.
- * Uses smbj (SMB2/3) and integrates with local CacheManager for speed.
- */
 class SmbManager(
     private val context: Context,
     private val cacheManager: CacheManager
@@ -31,31 +27,26 @@ class SmbManager(
 
     private val client: SMBClient by lazy {
         val config = SmbConfig.builder()
-            .withTimeout(15_000)           // 15s connection timeout
+            .withTimeout(15_000)
             .withSoTimeout(30_000)
             .withDfsEnabled(false)
             .build()
         SMBClient(config)
     }
 
-    // Keep a few open sessions to avoid reconnecting on every folder open
+    // ذخیره اتصال و نشست، DiskShare در هر بار فراخوانی به صورت جداگانه مدیریت می‌شود
     private val sessions = ConcurrentHashMap<String, Pair<Connection, Session>>()
 
     companion object {
         private const val TAG = "HaminaSMB"
     }
 
-    /**
-     * List directory contents. Tries cache first, then network.
-     * Returns items sorted by name by default (caller can re-sort).
-     */
     suspend fun listDirectory(
         server: SmbServer,
         path: String = "",
         forceRefresh: Boolean = false
     ): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
         try {
-            // 1. Try local cache first (unless forced)
             if (!forceRefresh) {
                 val cached = cacheManager.loadFolderListing(server.id, path)
                 if (cached != null) {
@@ -64,53 +55,49 @@ class SmbManager(
                 }
             }
 
-            // 2. Connect / reuse session
             val share = connectShare(server)
                 ?: return@withContext Result.failure(Exception("Could not connect to ${server.host}"))
 
-            // 3. List remote directory
-            val remotePath = path.trimStart('/').replace('\\', '/')
-            val files = share.list(remotePath)
+            // استفاده از use برای اطمینان از بسته شدن DiskShare
+            share.use { diskShare ->
+                val remotePath = path.trimStart('/').replace('\\', '/')
+                val files = diskShare.list(remotePath)
 
-            val items = files
-                .filter { it.fileName != "." && it.fileName != ".." }
-                .map { f ->
-                    val fullPath = if (remotePath.isEmpty()) f.fileName
-                                   else "$remotePath/${f.fileName}"
-                    val isDir = f.fileAttributes.toInt() and 0x10 != 0   // DIRECTORY attribute
-                    MediaItem(
-                        id = UUID.nameUUIDFromBytes("${server.id}|$fullPath".toByteArray()).toString(),
-                        name = f.fileName,
-                        path = fullPath,
-                        isDirectory = isDir,
-                        size = if (isDir) 0L else f.endOfFile,
-                        lastModified = f.lastWriteTime.toEpochMillis(),
-                        serverId = server.id,
-                        mimeType = if (isDir) null else guessMime(f.fileName)
-                    )
-                }
-                .sortedWith(compareBy<MediaItem> { !it.isDirectory }.thenBy { it.name.lowercase() })
+                val items = files
+                    .filter { it.fileName != "." && it.fileName != ".." }
+                    .map { f ->
+                        val fullPath = if (remotePath.isEmpty()) f.fileName
+                                       else "$remotePath/${f.fileName}"
+                        val isDir = f.fileAttributes.toInt() and 0x10 != 0
+                        MediaItem(
+                            id = UUID.nameUUIDFromBytes("${server.id}|$fullPath".toByteArray()).toString(),
+                            name = f.fileName,
+                            path = fullPath,
+                            isDirectory = isDir,
+                            size = if (isDir) 0L else f.endOfFile,
+                            lastModified = f.lastWriteTime.toEpochMillis(),
+                            serverId = server.id,
+                            mimeType = if (isDir) null else guessMime(f.fileName)
+                        )
+                    }
+                    .sortedWith(compareBy<MediaItem> { !it.isDirectory }.thenBy { it.name.lowercase() })
 
-            // 4. Cache the result for next time
-            cacheManager.saveFolderListing(server.id, path, items)
-
-            Result.success(items)
+                cacheManager.saveFolderListing(server.id, path, items)
+                Result.success(items)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "listDirectory failed for ${server.host}/$path", e)
             Result.failure(e)
         }
     }
 
-    /**
-     * Open a readable InputStream for a remote file (used by the player).
-     * The caller is responsible for closing the stream.
-     */
     suspend fun openFileStream(server: SmbServer, path: String): Result<java.io.InputStream> =
         withContext(Dispatchers.IO) {
             try {
                 val share = connectShare(server)
                     ?: return@withContext Result.failure(Exception("No connection"))
 
+                // توجه: inputStream باید تا زمان خواندن باز بماند، بنابراین نمی‌توان از use استفاده کرد
                 val cleanPath = path.trimStart('/').replace('\\', '/')
                 val file = share.openFile(
                     cleanPath,
@@ -120,6 +107,7 @@ class SmbManager(
                     SMB2CreateDisposition.FILE_OPEN,
                     null
                 )
+                // DiskShare به صورت خودکار بسته نمی‌شود، اما جریان ورودی به آن وابسته است
                 Result.success(file.inputStream)
             } catch (e: Exception) {
                 Log.e(TAG, "openFileStream failed", e)
@@ -127,35 +115,52 @@ class SmbManager(
             }
         }
 
-    /**
-     * Rename a file or folder.
-     */
     suspend fun rename(server: SmbServer, oldPath: String, newName: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             try {
                 val share = connectShare(server)
                     ?: return@withContext Result.failure(Exception("No connection"))
-                val parent = oldPath.substringBeforeLast('/', "")
-                val newPath = if (parent.isEmpty()) newName else "$parent/$newName"
-                share.rename(oldPath.trimStart('/'), newPath)
-                // Invalidate cache for parent folder
-                cacheManager.saveFolderListing(server.id, parent, emptyList()) // force refresh next time
+
+                val cleanOld = oldPath.trimStart('/').replace('/', '\\')
+                val parent = cleanOld.substringBeforeLast('\\', "")
+                val newPath = if (parent.isEmpty()) newName else "$parent\\$newName"
+
+                // تلاش برای باز کردن به عنوان فایل، در صورت شکست به عنوان دایرکتوری
+                val entry = try {
+                    share.openFile(
+                        cleanOld,
+                        EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE),
+                        null,
+                        SMB2ShareAccess.ALL,
+                        SMB2CreateDisposition.FILE_OPEN,
+                        null
+                    )
+                } catch (e: Exception) {
+                    share.openDirectory(
+                        cleanOld,
+                        EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE),
+                        null,
+                        SMB2ShareAccess.ALL,
+                        SMB2CreateDisposition.FILE_OPEN,
+                        null
+                    )
+                }
+                entry.rename(newPath, true)
+                entry.close()
+
+                cacheManager.saveFolderListing(server.id, parent.replace('\\', '/'), emptyList())
                 Result.success(Unit)
             } catch (e: Exception) {
                 Result.failure(e)
             }
         }
 
-    /**
-     * Delete a file or empty folder.
-     */
     suspend fun delete(server: SmbServer, path: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             try {
                 val share = connectShare(server)
                     ?: return@withContext Result.failure(Exception("No connection"))
                 val clean = path.trimStart('/')
-                // Try as file first, then directory
                 try {
                     share.rm(clean)
                 } catch (_: Exception) {
@@ -169,33 +174,28 @@ class SmbManager(
             }
         }
 
-    // -------------------- internal helpers --------------------
-
     private fun connectShare(server: SmbServer): DiskShare? {
         val key = server.id
-        try {
-            // Reuse existing session if still alive
-            sessions[key]?.let { (conn, sess) ->
-                if (conn.isConnected) {
-                    return sess.connectShare(server.share) as? DiskShare
-                } else {
-                    sessions.remove(key)
+        return try {
+            val (connection, session) = sessions[key]?.takeIf { it.first.isConnected }
+                ?: run {
+                    // ایجاد اتصال جدید
+                    val conn = client.connect(server.host, server.port)
+                    val auth = if (server.username.isBlank()) {
+                        AuthenticationContext.anonymous()
+                    } else {
+                        AuthenticationContext(server.username, server.password.toCharArray(), server.domain)
+                    }
+                    val sess = conn.authenticate(auth)
+                    sessions[key] = conn to sess
+                    conn to sess
                 }
-            }
 
-            val connection = client.connect(server.host, server.port)
-            val auth = if (server.username.isBlank()) {
-                AuthenticationContext.anonymous()
-            } else {
-                AuthenticationContext(server.username, server.password.toCharArray(), server.domain)
-            }
-            val session = connection.authenticate(auth)
-            sessions[key] = connection to session
-            return session.connectShare(server.share) as? DiskShare
+            session.connectShare(server.share) as? DiskShare
         } catch (e: Exception) {
             Log.e(TAG, "Failed to connect to ${server.host}", e)
             sessions.remove(key)
-            return null
+            null
         }
     }
 

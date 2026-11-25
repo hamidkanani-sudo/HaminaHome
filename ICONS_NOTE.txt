@@ -1,0 +1,2 @@
+Hamina launcher icon, Android TV banner and splash artwork are included in app/src/main/res.
+The manifest references the launcher icon and TV banner resources.

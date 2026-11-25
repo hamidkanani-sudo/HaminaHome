@@ -1,0 +1,3 @@
+The original project contains gradle-wrapper.properties but not gradlew scripts or gradle-wrapper.jar.
+The included GitHub Actions workflow installs Gradle 8.9 directly and builds without the wrapper.
+For local builds, install Gradle 8.9 and run ./build-apk.sh.

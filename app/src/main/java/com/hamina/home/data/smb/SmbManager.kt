@@ -90,7 +90,8 @@ class SmbManager(
                         f.fileName != "." && f.fileName != ".." && !f.fileName.startsWith(".")
                     }
                     .map { f ->
-                        val isDir = f.fileAttributes.contains(FileAttributes.FILE_ATTRIBUTE_DIRECTORY)
+                        // smbj exposes fileAttributes as a Long bitmask, not a Set
+                        val isDir = (f.fileAttributes and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value) != 0L
                         val childPath = buildChildPath(server, shareName, remotePath, f.fileName)
                         MediaItem(
                             id = UUID.randomUUID().toString(),

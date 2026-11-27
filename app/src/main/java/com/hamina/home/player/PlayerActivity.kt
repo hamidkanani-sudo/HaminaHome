@@ -1,38 +1,56 @@
 package com.hamina.home.player
 
+import android.graphics.Color
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import com.hamina.home.HaminaApp
 import com.hamina.home.R
 import com.hamina.home.data.model.AspectRatio
+import com.hamina.home.data.model.PlayerSettings
 import com.hamina.home.data.model.SmbServer
 import com.hamina.home.data.smb.SmbDataSource
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.Locale
 
 /**
  * Full-screen video player with:
  * - Resume from last position
- * - Global subtitle size / color / position / offset
- * - Aspect ratio control
- * - Audio & subtitle track selection via remote
+ * - Settings panel (Up or Menu): subtitle and audio track, subtitle size / color / style /
+ *   height, playback speed and picture mode. Subtitle and picture settings are remembered.
+ * - Subtitle files next to the video (.srt, .vtt, .ass), including Windows-1256 Persian files
  * - Periodic position saving
  */
 @UnstableApi
@@ -48,12 +66,20 @@ class PlayerActivity : ComponentActivity() {
 
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
+    private var menuView: ComposeView? = null
     private var mediaId: String = ""
     private var saveJob: Job? = null
     private var currentServer: SmbServer? = null
     private var currentPath: String = ""
     private var playName: String = ""
-    private var aspectRatio: AspectRatio = AspectRatio.FIT
+
+    // State read by the settings panel
+    private var settings by mutableStateOf(PlayerSettings())
+    private var menuVisible by mutableStateOf(false)
+    private var textTracks by mutableStateOf<List<TrackOption>>(emptyList())
+    private var audioTracks by mutableStateOf<List<TrackOption>>(emptyList())
+    private var textDisabled by mutableStateOf(true)
+    private var speed by mutableFloatStateOf(1f)
 
     /** Position to continue from when the player is re-created (e.g. after Home -> back to the app). */
     private var resumeFromMs: Long = -1L
@@ -66,6 +92,24 @@ class PlayerActivity : ComponentActivity() {
         setContentView(R.layout.activity_player)
 
         playerView = findViewById(R.id.player_view)
+        menuView = findViewById<ComposeView>(R.id.player_menu).also { view ->
+            view.setContent {
+                if (menuVisible) {
+                    PlayerMenu(
+                        settings = settings,
+                        textTracks = textTracks,
+                        textDisabled = textDisabled,
+                        audioTracks = audioTracks,
+                        speed = speed,
+                        onSelectText = { selectText(it) },
+                        onSelectAudio = { selectAudio(it) },
+                        onSettings = { updateSettings(it) },
+                        onSpeed = { setSpeed(it) }
+                    )
+                }
+            }
+        }
+
         mediaId = intent.getStringExtra(EXTRA_MEDIA_ID) ?: ""
         currentPath = intent.getStringExtra(EXTRA_PATH) ?: ""
         playName = intent.getStringExtra(EXTRA_NAME) ?: ""
@@ -79,7 +123,7 @@ class PlayerActivity : ComponentActivity() {
                 finish()
                 return@launch
             }
-            aspectRatio = app.settingsRepository.playerSettings.first().aspectRatio
+            settings = app.settingsRepository.playerSettings.first()
             ensurePlayer()
         }
     }
@@ -98,7 +142,11 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun setupPlayer(server: SmbServer) {
-        val dataSourceFactory = SmbDataSource.Factory(app.smbManager, server)
+        // DefaultDataSource handles the converted subtitle files (file://); smb:// goes to our source.
+        val dataSourceFactory = DefaultDataSource.Factory(
+            this,
+            SmbDataSource.Factory(app.smbManager, server)
+        )
         val mediaSourceFactory = DefaultMediaSourceFactory(this)
             .setDataSourceFactory(dataSourceFactory)
 
@@ -107,7 +155,9 @@ class PlayerActivity : ComponentActivity() {
             .build()
         player = exo
         playerView?.player = exo
-        applyAspectRatio(aspectRatio)
+        applyAspectRatio(settings.aspectRatio)
+        applySubtitleStyle()
+        exo.setPlaybackSpeed(speed)
 
         exo.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
@@ -118,17 +168,27 @@ class PlayerActivity : ComponentActivity() {
                     Toast.LENGTH_LONG
                 ).show()
             }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                refreshTracks()
+            }
         })
 
-        val mediaItem = MediaItem.Builder()
-            .setUri(SmbDataSource.buildUri(server, currentPath))
-            .setMediaId(mediaId)
-            .build()
-
-        exo.setMediaItem(mediaItem)
-        exo.prepare()
-
         lifecycleScope.launch {
+            // Subtitle files next to the video (the folder listing is cached, so this is quick).
+            val sidecars = withContext(Dispatchers.IO) {
+                SubtitleSupport.findSidecars(this@PlayerActivity, server, currentPath)
+            }
+            if (player !== exo) return@launch
+
+            val mediaItem = MediaItem.Builder()
+                .setUri(SmbDataSource.buildUri(server, currentPath))
+                .setMediaId(mediaId)
+                .setSubtitleConfigurations(sidecars)
+                .build()
+            exo.setMediaItem(mediaItem)
+            exo.prepare()
+
             val pending = resumeFromMs
             if (pending > 0) {
                 resumeFromMs = -1L
@@ -158,13 +218,143 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    // ---------- settings panel ----------
+
+    private fun openMenu() {
+        if (player == null) return
+        refreshTracks()
+        menuVisible = true
+        menuView?.visibility = View.VISIBLE
+    }
+
+    private fun closeMenu() {
+        menuVisible = false
+        menuView?.visibility = View.GONE
+    }
+
+    private fun updateSettings(new: PlayerSettings) {
+        settings = new
+        applySubtitleStyle()
+        applyAspectRatio(new.aspectRatio)
+        app.applicationScope.launch { app.settingsRepository.updatePlayerSettings(new) }
+    }
+
+    private fun setSpeed(value: Float) {
+        speed = value
+        player?.setPlaybackSpeed(value)
+    }
+
+    private fun selectText(option: TrackOption?) {
+        val p = player ?: return
+        val builder = p.trackSelectionParameters.buildUpon()
+        if (option == null) {
+            builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+        } else {
+            builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            builder.setOverrideForType(TrackSelectionOverride(option.group, option.trackIndex))
+        }
+        p.trackSelectionParameters = builder.build()
+    }
+
+    private fun selectAudio(option: TrackOption) {
+        val p = player ?: return
+        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+            .setOverrideForType(TrackSelectionOverride(option.group, option.trackIndex))
+            .build()
+    }
+
+    private fun refreshTracks() {
+        val p = player ?: return
+        val text = ArrayList<TrackOption>()
+        val audio = ArrayList<TrackOption>()
+        for (group in p.currentTracks.groups) {
+            val isText = group.type == C.TRACK_TYPE_TEXT
+            val isAudio = group.type == C.TRACK_TYPE_AUDIO
+            if (!isText && !isAudio) continue
+            for (i in 0 until group.length) {
+                if (!group.isTrackSupported(i)) continue
+                val list = if (isText) text else audio
+                val label = trackLabel(group.getTrackFormat(i), list.size + 1, isAudio)
+                list.add(TrackOption(label, group.isTrackSelected(i), group.mediaTrackGroup, i))
+            }
+        }
+        textTracks = text
+        audioTracks = audio
+        textDisabled = p.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+    }
+
+    private fun trackLabel(format: Format, number: Int, isAudio: Boolean): String {
+        val language = format.language
+            ?.takeIf { it != "und" && it.isNotBlank() }
+            ?.let { Locale.forLanguageTag(it).displayLanguage }
+            ?.takeIf { it.isNotBlank() }
+        val base = format.label?.takeIf { it.isNotBlank() }
+            ?: language
+            ?: (if (isAudio) "Audio $number" else "Subtitle $number")
+
+        val details = mutableListOf<String>()
+        if (isAudio) {
+            when (format.channelCount) {
+                1 -> details.add("Mono")
+                2 -> details.add("Stereo")
+                6 -> details.add("5.1")
+                8 -> details.add("7.1")
+                else -> if (format.channelCount > 0) details.add("${format.channelCount}ch")
+            }
+            format.sampleMimeType?.substringAfter('/')?.uppercase()?.let { details.add(it) }
+        }
+        // Add the language when the label is a custom text that does not mention it.
+        val shown = if (language != null && !base.contains(language, ignoreCase = true) &&
+            format.label != null
+        ) {
+            "$base ($language)"
+        } else {
+            base
+        }
+        return if (details.isEmpty()) shown else "$shown • ${details.joinToString(" ")}"
+    }
+
+    private fun applySubtitleStyle() {
+        val view = playerView?.subtitleView ?: return
+        val s = settings
+        val foreground = s.subtitleColor.toInt()
+        val background: Int
+        val edgeType: Int
+        when (s.subtitleStyle) {
+            1 -> {
+                background = Color.TRANSPARENT
+                edgeType = CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW
+            }
+            2 -> {
+                background = 0xB0000000.toInt()
+                edgeType = CaptionStyleCompat.EDGE_TYPE_NONE
+            }
+            3 -> {
+                background = Color.TRANSPARENT
+                edgeType = CaptionStyleCompat.EDGE_TYPE_NONE
+            }
+            else -> {
+                background = Color.TRANSPARENT
+                edgeType = CaptionStyleCompat.EDGE_TYPE_OUTLINE
+            }
+        }
+        view.setStyle(
+            CaptionStyleCompat(foreground, background, Color.TRANSPARENT, edgeType, Color.BLACK, null)
+        )
+        // Our size and color should win over styles embedded in .ass / .vtt files.
+        view.setApplyEmbeddedStyles(false)
+        view.setApplyEmbeddedFontSizes(false)
+        view.setFractionalTextSize(SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * s.subtitleSize)
+        view.setBottomPaddingFraction((1f - s.subtitlePosition).coerceIn(0.02f, 0.5f))
+    }
+
     private fun applyAspectRatio(ratio: AspectRatio) {
         val view = playerView ?: return
         when (ratio) {
-            AspectRatio.FIT -> view.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
-            AspectRatio.FILL -> view.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-            AspectRatio.STRETCH -> view.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FILL
-            AspectRatio.ORIGINAL -> view.resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+            AspectRatio.FIT -> view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            AspectRatio.FILL -> view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            AspectRatio.STRETCH -> view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+            AspectRatio.ORIGINAL -> view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
     }
 
@@ -188,7 +378,34 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    // ---------- keys ----------
+
+    /** Opens the panel before the PlayerView can use the key for its own controller. */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!menuVisible && player != null &&
+            event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0
+        ) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_MENU,
+                KeyEvent.KEYCODE_INFO,
+                KeyEvent.KEYCODE_CAPTIONS,
+                KeyEvent.KEYCODE_MEDIA_AUDIO_TRACK,
+                KeyEvent.KEYCODE_SETTINGS -> {
+                    openMenu()
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (menuVisible) {
+            // The panel handles its own keys; anything else must not seek the video behind it.
+            if (keyCode == KeyEvent.KEYCODE_BACK || keyCode == KeyEvent.KEYCODE_MENU) closeMenu()
+            return true
+        }
         val p = player ?: return super.onKeyDown(keyCode, event)
         when (keyCode) {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
@@ -211,30 +428,8 @@ class PlayerActivity : ComponentActivity() {
                 finish() // position is saved in onStop
                 return true
             }
-            KeyEvent.KEYCODE_MEDIA_AUDIO_TRACK -> {
-                cycleAudioTrack()
-                return true
-            }
-            KeyEvent.KEYCODE_CAPTIONS -> {
-                cycleSubtitleTrack()
-                return true
-            }
         }
         return super.onKeyDown(keyCode, event)
-    }
-
-    private fun cycleAudioTrack() {
-        val p = player ?: return
-        val groups = p.currentTracks.groups
-        val audioGroups = groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-        Toast.makeText(this, "Audio tracks: ${audioGroups.size}", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun cycleSubtitleTrack() {
-        val p = player ?: return
-        val groups = p.currentTracks.groups
-        val textGroups = groups.filter { it.type == C.TRACK_TYPE_TEXT }
-        Toast.makeText(this, "Subtitle tracks: ${textGroups.size}", Toast.LENGTH_SHORT).show()
     }
 
     private fun formatTime(ms: Long): String {
@@ -247,6 +442,7 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        closeMenu()
         val p = player
         if (p != null) {
             val position = p.currentPosition

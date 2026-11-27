@@ -1,9 +1,11 @@
 package com.hamina.home.ui
 
+import android.graphics.Bitmap
 import android.os.SystemClock
 import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,8 +28,10 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -38,17 +42,22 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import com.hamina.home.HaminaApp
 import com.hamina.home.data.model.MediaItem
+import com.hamina.home.data.model.SmbServer
 import com.hamina.home.data.model.SortMode
+import kotlinx.coroutines.delay
 import java.text.DateFormat
 import java.util.Date
 
@@ -97,6 +106,8 @@ fun FocusSurface(
     focusedScale: Float = 1.04f,
     onFocused: () -> Unit = {},
     onMenuKey: (() -> Unit)? = null,
+    onLeftKey: (() -> Unit)? = null,
+    onRightKey: (() -> Unit)? = null,
     onClick: () -> Unit,
     content: @Composable BoxScope.(focused: Boolean) -> Unit
 ) {
@@ -132,7 +143,14 @@ fun FocusSurface(
             }
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp) {
+                val code = event.nativeKeyEvent.keyCode
+                if (code == AndroidKeyEvent.KEYCODE_DPAD_LEFT && onLeftKey != null) {
+                    if (event.type == KeyEventType.KeyDown) onLeftKey()
+                    true
+                } else if (code == AndroidKeyEvent.KEYCODE_DPAD_RIGHT && onRightKey != null) {
+                    if (event.type == KeyEventType.KeyDown) onRightKey()
+                    true
+                } else if (event.type == KeyEventType.KeyUp) {
                     when (event.nativeKeyEvent.keyCode) {
                         AndroidKeyEvent.KEYCODE_DPAD_CENTER,
                         AndroidKeyEvent.KEYCODE_ENTER -> {
@@ -289,4 +307,43 @@ fun sortLabel(mode: SortMode): String = when (mode) {
     SortMode.SIZE_ASC -> "Smallest first"
     SortMode.SIZE_DESC -> "Largest first"
     SortMode.LAST_PLAYED -> "Recently played"
+}
+
+
+// ---------- thumbnails ----------
+
+/**
+ * Loads the thumbnail of [item] in the background. The cached version appears immediately;
+ * a missing one is only created when [generate] is true (images always, videos when focused),
+ * so browsing never waits for it. Leaving the screen or losing focus cancels a pending request.
+ */
+@Composable
+fun rememberThumbnail(server: SmbServer?, item: MediaItem, generate: Boolean): State<Bitmap?> {
+    val manager = HaminaApp.instance.thumbnailManager
+    val itemKey = "${item.id}_${item.size}_${item.lastModified}"
+    return produceState<Bitmap?>(manager.peekMemory(item), itemKey, generate) {
+        if (!manager.supports(item)) return@produceState
+        if (value != null) return@produceState
+        val cached = manager.peek(item)
+        if (cached != null) {
+            value = cached
+            return@produceState
+        }
+        if (generate && server != null) {
+            // Wait until focus settles, so scrolling over videos does not start work for each one.
+            if (item.isVideo) delay(300)
+            value = manager.load(server, item)
+        }
+    }
+}
+
+@Composable
+fun ThumbImage(bitmap: Bitmap, modifier: Modifier = Modifier) {
+    val image = remember(bitmap) { bitmap.asImageBitmap() }
+    Image(
+        bitmap = image,
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = modifier
+    )
 }

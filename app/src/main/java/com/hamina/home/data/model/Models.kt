@@ -48,7 +48,8 @@ data class MediaItem(
                 name.lowercase().let {
                     it.endsWith(".jpg") || it.endsWith(".jpeg") || it.endsWith(".png") ||
                     it.endsWith(".gif") || it.endsWith(".webp") || it.endsWith(".bmp") ||
-                    it.endsWith(".heic")
+                    it.endsWith(".heic") || it.endsWith(".heif") ||
+                    it.endsWith(".avif") || it.endsWith(".jfif")
                 }
 
     val isAudio: Boolean
@@ -88,6 +89,7 @@ data class PlayerSettings(
     val subtitleColor: Long = 0xFFFFFFFF,    // ARGB
     val subtitlePosition: Float = 0.9f,      // 0.0 top → 1.0 bottom
     val subtitleOffsetMs: Long = 0L,         // global default offset
+    val subtitleStyle: Int = 0,              // 0 outline, 1 shadow, 2 background box, 3 plain
     val aspectRatio: AspectRatio = AspectRatio.FIT
 )
 

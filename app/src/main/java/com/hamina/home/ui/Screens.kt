@@ -37,6 +37,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -456,7 +457,7 @@ private fun BrowserScreen(vm: BrowserViewModel, onOpenItem: (MediaItem, Int) -> 
             }
         }
 
-        InfoBar(vm.selectedItem)
+        InfoBar(vm.selectedItem, server)
     }
 }
 
@@ -498,14 +499,39 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun InfoBar(selected: MediaItem?) {
+private fun InfoBar(selected: MediaItem?, server: SmbServer?) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(46.dp)
+            .height(72.dp)
             .padding(top = 8.dp, start = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (selected != null && (selected.isImage || selected.isVideo)) {
+            // Preview of the focused file. Videos get theirs a moment after focus settles.
+            val thumb by rememberThumbnail(server, selected, generate = true)
+            val visual = visualFor(selected)
+            Box(
+                modifier = Modifier
+                    .size(width = 100.dp, height = 56.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(visual.color.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center
+            ) {
+                val bitmap = thumb
+                if (bitmap != null) {
+                    ThumbImage(bitmap, Modifier.fillMaxSize())
+                } else {
+                    Icon(
+                        imageVector = visual.icon,
+                        contentDescription = null,
+                        tint = visual.color,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+        }
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = selected?.name ?: "",
@@ -555,6 +581,7 @@ private fun FocusRestore(
 @Composable
 private fun MediaList(vm: BrowserViewModel, onOpenItem: (MediaItem, Int) -> Unit) {
     val items = vm.items
+    val server = vm.currentServer
     val listState = rememberLazyListState()
     val requesters = remember(items.size) { List(items.size) { FocusRequester() } }
 
@@ -571,6 +598,7 @@ private fun MediaList(vm: BrowserViewModel, onOpenItem: (MediaItem, Int) -> Unit
         itemsIndexed(items) { index, item ->
             MediaRow(
                 item = item,
+                server = server,
                 requester = requesters[index],
                 onFocused = { vm.focusIndex = index },
                 onClick = { onOpenItem(item, index) }
@@ -582,6 +610,7 @@ private fun MediaList(vm: BrowserViewModel, onOpenItem: (MediaItem, Int) -> Unit
 @Composable
 private fun MediaGrid(vm: BrowserViewModel, onOpenItem: (MediaItem, Int) -> Unit) {
     val items = vm.items
+    val server = vm.currentServer
     val gridState = rememberLazyGridState()
     val requesters = remember(items.size) { List(items.size) { FocusRequester() } }
 
@@ -600,6 +629,7 @@ private fun MediaGrid(vm: BrowserViewModel, onOpenItem: (MediaItem, Int) -> Unit
         gridItemsIndexed(items) { index, item ->
             MediaCard(
                 item = item,
+                server = server,
                 requester = requesters[index],
                 onFocused = { vm.focusIndex = index },
                 onClick = { onOpenItem(item, index) }
@@ -611,6 +641,7 @@ private fun MediaGrid(vm: BrowserViewModel, onOpenItem: (MediaItem, Int) -> Unit
 @Composable
 private fun MediaRow(
     item: MediaItem,
+    server: SmbServer?,
     requester: FocusRequester,
     onFocused: () -> Unit,
     onClick: () -> Unit
@@ -624,14 +655,34 @@ private fun MediaRow(
         focusedScale = 1.02f,
         onFocused = onFocused,
         onClick = onClick
-    ) { _ ->
+    ) { focused ->
+        // Images load their thumbnail in the background; videos once they are focused.
+        val thumb by rememberThumbnail(server, item, generate = item.isImage || (item.isVideo && focused))
         Row(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconTile(icon = visual.icon, tint = visual.color, size = 40.dp)
+            Box(
+                modifier = Modifier
+                    .size(width = 64.dp, height = 40.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(visual.color.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center
+            ) {
+                val bitmap = thumb
+                if (bitmap != null) {
+                    ThumbImage(bitmap, Modifier.fillMaxSize())
+                } else {
+                    Icon(
+                        imageVector = visual.icon,
+                        contentDescription = null,
+                        tint = visual.color,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
             Spacer(Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -659,6 +710,7 @@ private fun MediaRow(
 @Composable
 private fun MediaCard(
     item: MediaItem,
+    server: SmbServer?,
     requester: FocusRequester,
     onFocused: () -> Unit,
     onClick: () -> Unit
@@ -672,7 +724,8 @@ private fun MediaCard(
         focusedScale = 1.05f,
         onFocused = onFocused,
         onClick = onClick
-    ) { _ ->
+    ) { focused ->
+        val thumb by rememberThumbnail(server, item, generate = item.isImage || (item.isVideo && focused))
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
@@ -688,12 +741,34 @@ private fun MediaCard(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = visual.icon,
-                    contentDescription = null,
-                    tint = visual.color,
-                    modifier = Modifier.size(40.dp)
-                )
+                val bitmap = thumb
+                if (bitmap != null) {
+                    ThumbImage(bitmap, Modifier.fillMaxSize())
+                    if (item.isVideo) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(8.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0x99000000))
+                                .padding(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                } else {
+                    Icon(
+                        imageVector = visual.icon,
+                        contentDescription = null,
+                        tint = visual.color,
+                        modifier = Modifier.size(40.dp)
+                    )
+                }
                 if (item.lastPlayedPosition > 0) {
                     Box(
                         modifier = Modifier

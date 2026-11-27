@@ -10,4 +10,10 @@
         android:layout_height="match_parent"
         android:keepScreenOn="true" />
 
+    <androidx.compose.ui.platform.ComposeView
+        android:id="@+id/player_menu"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
 </FrameLayout>

@@ -19,6 +19,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
         val SUBTITLE_POSITION = floatPreferencesKey("subtitle_position")
         val SUBTITLE_OFFSET = longPreferencesKey("subtitle_offset")
         val ASPECT_RATIO = stringPreferencesKey("aspect_ratio")
+        val SUBTITLE_STYLE = intPreferencesKey("subtitle_style")
     }
 
     val viewMode: Flow<ViewMode> = dataStore.data.map { prefs ->
@@ -42,6 +43,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             subtitleColor = prefs[Keys.SUBTITLE_COLOR] ?: 0xFFFFFFFF,
             subtitlePosition = prefs[Keys.SUBTITLE_POSITION] ?: 0.9f,
             subtitleOffsetMs = prefs[Keys.SUBTITLE_OFFSET] ?: 0L,
+            subtitleStyle = prefs[Keys.SUBTITLE_STYLE] ?: 0,
             aspectRatio = try {
                 AspectRatio.valueOf(prefs[Keys.ASPECT_RATIO] ?: AspectRatio.FIT.name)
             } catch (_: Exception) {
@@ -64,6 +66,7 @@ class SettingsRepository(private val dataStore: DataStore<Preferences>) {
             it[Keys.SUBTITLE_COLOR] = settings.subtitleColor
             it[Keys.SUBTITLE_POSITION] = settings.subtitlePosition
             it[Keys.SUBTITLE_OFFSET] = settings.subtitleOffsetMs
+            it[Keys.SUBTITLE_STYLE] = settings.subtitleStyle
             it[Keys.ASPECT_RATIO] = settings.aspectRatio.name
         }
     }

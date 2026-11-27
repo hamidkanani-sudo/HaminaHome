@@ -4,6 +4,12 @@
 
 Hamina lets you browse video and photo files on Windows PCs and other SMB2/3 shares over your local network, using an Android TV remote.
 
+## Changes in 1.4.0
+
+- Thumbnails: images show a thumbnail in the grid and list; videos get a preview frame once they are focused (and keep it afterwards). Folders and file lists load first; thumbnails are created in the background (at most a few files at a time), cached on disk and in memory, and requests are dropped when you scroll past.
+- Photo viewer: Left/Right for previous/next photo of the folder, OK to zoom (2x, 4x, fit) with D-pad panning, Down to rotate, Up to pin the info bar, Play/Pause for a slideshow, Menu for help. Next/previous photos are pre-loaded. HEIC/HEIF work on Android 9+, AVIF on Android 12+ (system decoders).
+- Video player: settings panel (Up or Menu) with subtitle track, audio track, subtitle size, color, style and height, playback speed and picture mode. Subtitle files next to the video (.srt, .vtt, .ass) are found automatically; Windows-1256 (Persian/Arabic) files are converted to UTF-8.
+
 ## Changes in 1.3.0
 
 - New look: dark theme, rounded cards, vector icons, larger text and TV-safe margins. Focused items grow and get an accent border, so the current selection is always visible.

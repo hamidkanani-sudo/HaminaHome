@@ -47,6 +47,19 @@ class SmbFileHandle internal constructor(
         }
     }
 
+    /** Reads the whole file into memory. Returns null if it is larger than [maxBytes]. */
+    fun readFully(maxBytes: Long): ByteArray? {
+        if (size > maxBytes || size > Int.MAX_VALUE) return null
+        val out = ByteArray(size.toInt())
+        var pos = 0
+        while (pos < out.size) {
+            val n = read(pos.toLong(), out, pos, minOf(out.size - pos, 512 * 1024))
+            if (n <= 0) break
+            pos += n
+        }
+        return if (pos == out.size) out else null
+    }
+
     /** Sequential stream view; closing the stream closes the file and share. */
     fun inputStream(): InputStream = object : InputStream() {
         private var pos = 0L
@@ -486,6 +499,11 @@ class SmbManager(
             lower.endsWith(".png") -> "image/png"
             lower.endsWith(".gif") -> "image/gif"
             lower.endsWith(".webp") -> "image/webp"
+            lower.endsWith(".bmp") -> "image/bmp"
+            lower.endsWith(".heic") -> "image/heic"
+            lower.endsWith(".heif") -> "image/heif"
+            lower.endsWith(".avif") -> "image/avif"
+            lower.endsWith(".jfif") -> "image/jpeg"
             lower.endsWith(".mp3") -> "audio/mpeg"
             lower.endsWith(".flac") -> "audio/flac"
             else -> "application/octet-stream"

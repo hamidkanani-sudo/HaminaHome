@@ -8,6 +8,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import com.hamina.home.data.model.MediaItem
 import com.hamina.home.data.playback.PlaybackRepository
+import com.hamina.home.player.PhotoSession
 import com.hamina.home.player.PhotoViewerActivity
 import com.hamina.home.player.PlayerActivity
 
@@ -46,13 +47,23 @@ class MainActivity : ComponentActivity() {
                     putExtra(PlayerActivity.EXTRA_MEDIA_ID, item.id)
                 }
             )
-            item.isImage -> startActivity(
-                Intent(this, PhotoViewerActivity::class.java).apply {
-                    putExtra(PhotoViewerActivity.EXTRA_SERVER_ID, server.id)
-                    putExtra(PhotoViewerActivity.EXTRA_PATH, item.path)
-                    putExtra(PhotoViewerActivity.EXTRA_NAME, item.name)
-                }
-            )
+            item.isImage -> {
+                // The viewer pages through all images of this folder (in the order shown).
+                val images = vm.items.filter { it.isImage }
+                PhotoSession.serverId = server.id
+                PhotoSession.items = images
+                startActivity(
+                    Intent(this, PhotoViewerActivity::class.java).apply {
+                        putExtra(PhotoViewerActivity.EXTRA_SERVER_ID, server.id)
+                        putExtra(PhotoViewerActivity.EXTRA_PATH, item.path)
+                        putExtra(PhotoViewerActivity.EXTRA_NAME, item.name)
+                        putExtra(
+                            PhotoViewerActivity.EXTRA_INDEX,
+                            images.indexOfFirst { it.id == item.id }
+                        )
+                    }
+                )
+            }
             else -> Toast.makeText(this, "Unsupported file type", Toast.LENGTH_SHORT).show()
         }
     }

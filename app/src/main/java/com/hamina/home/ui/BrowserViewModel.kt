@@ -11,6 +11,8 @@ import com.hamina.home.HaminaApp
 import com.hamina.home.data.model.MediaItem
 import com.hamina.home.data.model.SmbServer
 import com.hamina.home.data.model.SortMode
+import com.hamina.home.data.model.ViewMode
+import com.hamina.home.data.playback.PlaybackRepository
 import com.hamina.home.util.NaturalOrder
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -25,7 +27,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     private val app get() = HaminaApp.instance
 
+    // ---------- state shown by the UI ----------
+
     var servers by mutableStateOf<List<SmbServer>>(emptyList())
+        private set
+    var recent by mutableStateOf<List<PlaybackRepository.RecentPlay>>(emptyList())
         private set
     var items by mutableStateOf<List<MediaItem>>(emptyList())
         private set
@@ -34,19 +40,33 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
-    /** The server we are inside of (null = server list is shown). */
+    /** The server we are inside of (null = home screen is shown). */
     var currentServer by mutableStateOf<SmbServer?>(null)
         private set
     var currentPath by mutableStateOf("")
         private set
     var sortMode by mutableStateOf(SortMode.NAME_ASC)
         private set
+    var viewMode by mutableStateOf(ViewMode.LIST)
+        private set
 
-    /** Index of the focused row in whichever list is shown. Updated by the UI on focus changes. */
+    /** On the home screen: clicking a server edits it instead of opening it. */
+    var editMode by mutableStateOf(false)
+        private set
+
+    /** Index of the focused entry in whichever list is shown. Updated by the UI on focus changes. */
     var focusIndex by mutableIntStateOf(0)
 
-    /** Bumped whenever the UI should move focus to [focusIndex] (after loading, going back, ...). */
-    var focusToken by mutableIntStateOf(0)
+    /** True while the UI should move focus to [focusIndex] (after loading, going back, ...). */
+    var focusPending by mutableStateOf(false)
+        private set
+
+    /** On the home screen, the first start focuses "Continue watching"; coming back focuses the server. */
+    var focusRecentFirst by mutableStateOf(true)
+        private set
+
+    /** The home screen is ready once servers and recent items were read. */
+    var homeReady by mutableStateOf(false)
         private set
 
     var showServerForm by mutableStateOf(false)
@@ -62,10 +82,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     private var lastServerIndex = 0
     private var loadJob: Job? = null
     private var retryAction: (() -> Unit)? = null
+    private var serversLoaded = false
+    private var recentLoaded = false
 
     init {
         viewModelScope.launch {
-            app.serverRepository.servers.collect { servers = it }
+            app.serverRepository.servers.collect {
+                servers = it
+                serversLoaded = true
+                updateReady()
+            }
+        }
+        viewModelScope.launch {
+            recent = app.playbackRepository.getRecent()
+            recentLoaded = true
+            updateReady()
         }
         viewModelScope.launch {
             app.settingsRepository.sortMode.collect { mode ->
@@ -75,6 +106,20 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         }
+        viewModelScope.launch {
+            app.settingsRepository.viewMode.collect { viewMode = it }
+        }
+    }
+
+    private fun updateReady() {
+        if (!homeReady && serversLoaded && recentLoaded) {
+            homeReady = true
+            focusPending = true
+        }
+    }
+
+    fun consumeFocus() {
+        focusPending = false
     }
 
     // ---------- navigation ----------
@@ -106,13 +151,13 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             loadJob?.cancel()
             isLoading = false
             retryAction = null
-            if (!hasListing) leaveServer() else focusToken++
+            if (!hasListing) leaveServer() else focusPending = true
             return true
         }
         if (errorMessage != null) {
             errorMessage = null
             retryAction = null
-            if (!hasListing) leaveServer() else focusToken++
+            if (!hasListing) leaveServer() else focusPending = true
             return true
         }
         val frame = stack.lastOrNull()
@@ -128,6 +173,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         retryAction?.invoke()
     }
 
+    /** Reloads the current folder from the server (bypasses the cache). */
     fun refresh() {
         val server = currentServer ?: return
         if (!hasListing) return
@@ -145,7 +191,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         retryAction = null
         stack.clear()
         focusIndex = lastServerIndex
-        focusToken++
+        focusRecentFirst = false
+        focusPending = true
+        loadRecent()
     }
 
     private fun load(
@@ -174,7 +222,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 if (pop) stack.removeLastOrNull()
                 items = ordered
                 focusIndex = restoreIndex.coerceIn(0, (ordered.size - 1).coerceAtLeast(0))
-                focusToken++
+                focusPending = ordered.isNotEmpty()
             } else {
                 errorMessage = result.exceptionOrNull()?.message ?: "Network error. Check connection."
             }
@@ -183,8 +231,13 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     // ---------- playback info ----------
 
-    /** Called when returning from the player so "resume" info and "last played" order are current. */
+    private fun loadRecent() {
+        viewModelScope.launch { recent = app.playbackRepository.getRecent() }
+    }
+
+    /** Called when returning from the player so resume info and "Continue watching" are current. */
     fun refreshPlayback() {
+        loadRecent()
         val snapshot = items
         if (snapshot.isEmpty()) return
         viewModelScope.launch {
@@ -209,7 +262,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // ---------- sorting ----------
+    // ---------- sorting / view ----------
 
     fun cycleSort() {
         val modes = SortMode.values()
@@ -217,6 +270,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         sortMode = next
         items = sortItems(items, next)
         viewModelScope.launch { app.settingsRepository.setSortMode(next) }
+    }
+
+    fun toggleViewMode() {
+        val next = if (viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST
+        viewMode = next
+        viewModelScope.launch { app.settingsRepository.setViewMode(next) }
     }
 
     private fun sortItems(list: List<MediaItem>, mode: SortMode): List<MediaItem> {
@@ -238,6 +297,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     // ---------- server form ----------
 
+    fun toggleEditMode() {
+        editMode = !editMode
+    }
+
     fun showAddServer() {
         formServer = null
         showServerForm = true
@@ -251,6 +314,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun hideServerForm() {
         showServerForm = false
         formServer = null
-        focusToken++ // restore focus on the list when the form closes
+        editMode = false
+        focusRecentFirst = false
+        focusPending = true // restore focus on the home screen when the form closes
     }
 }

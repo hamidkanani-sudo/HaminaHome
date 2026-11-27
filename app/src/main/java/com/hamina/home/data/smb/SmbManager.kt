@@ -7,6 +7,8 @@ import com.hamina.home.data.model.MediaItem
 import com.hamina.home.data.model.SmbServer
 import com.hamina.home.util.Ids
 import com.hamina.home.util.NaturalOrder
+import com.rapid7.client.dcerpc.mssrvs.ServerService
+import com.rapid7.client.dcerpc.transport.SMBTransportFactories
 import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.mssmb2.SMB2CreateDisposition
@@ -423,30 +425,18 @@ class SmbManager(
         val session = getSession(server) ?: return emptyList()
         val names = mutableListOf<String>()
 
+        // Ask the server for its share list (MS-SRVS over the IPC$ pipe) instead of guessing names.
         try {
-            val method = session.javaClass.methods.firstOrNull {
-                it.name == "listShares" && it.parameterCount == 0
-            }
-            if (method != null) {
-                val result = method.invoke(session)
-                if (result is Collection<*>) {
-                    for (item in result) {
-                        val n = when (item) {
-                            is String -> item
-                            else -> {
-                                try {
-                                    item?.javaClass?.getMethod("getShareName")?.invoke(item) as? String
-                                } catch (_: Exception) {
-                                    item?.toString()
-                                }
-                            }
-                        }
-                        if (!n.isNullOrBlank()) names.add(n)
-                    }
+            val service = ServerService(SMBTransportFactories.SRVSVC.getTransport(session))
+            for (info in service.getShares1()) {
+                val shareName = info.netName
+                // type 0 = disk share; ignore printers, devices, IPC and admin ($) shares
+                if (!shareName.isNullOrBlank() && (info.type and 0x0FFFFFFF) == 0) {
+                    names.add(shareName)
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "listShares reflection failed", e)
+            Log.w(TAG, "Share enumeration failed, falling back to common names", e)
         }
 
         if (names.isEmpty()) {

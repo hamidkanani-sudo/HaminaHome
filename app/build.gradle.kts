@@ -12,8 +12,8 @@ android {
         applicationId = "com.hamina.home"
         minSdk = 26          // Android 8.0+ suitable for most Android TV boxes
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -63,6 +63,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
@@ -79,6 +80,10 @@ dependencies {
 
     // SMB client - smbj is pure Java and reliable for SMB2/3
     implementation("com.hierynomus:smbj:0.13.0")
+    // Lists the shares of a server (MS-SRVS). Guava comes from media3 already.
+    implementation("com.rapid7.client:dcerpc:0.12.13") {
+        exclude(group = "com.google.guava", module = "guava")
+    }
 
     // Coroutines & Async
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")

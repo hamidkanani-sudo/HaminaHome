@@ -4,6 +4,14 @@
 
 Hamina lets you browse video and photo files on Windows PCs and other SMB2/3 shares over your local network, using an Android TV remote.
 
+## Changes in 1.3.0
+
+- New look: dark theme, rounded cards, vector icons, larger text and TV-safe margins. Focused items grow and get an accent border, so the current selection is always visible.
+- New home screen with a "Continue watching" row (resume directly) and server cards. "Edit servers" mode (or the Menu key on a server) opens the edit form.
+- List and Grid views with a toggle in the top bar (the choice is saved). A bottom bar shows the full name, size and date of the focused item.
+- Sort, view and refresh are separate buttons in the top bar instead of hints that all said "OK". Repeated key events are filtered so one press triggers one action.
+- Shares are now listed from the server (MS-SRVS) instead of guessing common names, so all disk shares show up when no share name is configured.
+
 ## Changes in 1.2.0
 
 - Resume works: media ids are now stable (hash of server + path) instead of random UUIDs; resume info and "Last played" sorting are filled from saved positions.

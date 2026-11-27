@@ -52,6 +52,7 @@ class PlayerActivity : ComponentActivity() {
     private var saveJob: Job? = null
     private var currentServer: SmbServer? = null
     private var currentPath: String = ""
+    private var playName: String = ""
     private var aspectRatio: AspectRatio = AspectRatio.FIT
 
     /** Position to continue from when the player is re-created (e.g. after Home -> back to the app). */
@@ -67,6 +68,7 @@ class PlayerActivity : ComponentActivity() {
         playerView = findViewById(R.id.player_view)
         mediaId = intent.getStringExtra(EXTRA_MEDIA_ID) ?: ""
         currentPath = intent.getStringExtra(EXTRA_PATH) ?: ""
+        playName = intent.getStringExtra(EXTRA_NAME) ?: ""
         val serverId = intent.getStringExtra(EXTRA_SERVER_ID) ?: ""
 
         lifecycleScope.launch {
@@ -173,12 +175,15 @@ class PlayerActivity : ComponentActivity() {
     private fun persistPosition(position: Long, duration: Long) {
         if (mediaId.isBlank() || duration <= 0 || duration == C.TIME_UNSET) return
         val id = mediaId
+        val serverId = currentServer?.id.orEmpty()
+        val path = currentPath
+        val name = playName
         app.applicationScope.launch {
             if (duration - position < 10_000) {
                 // Watched to the end: do not offer to resume.
                 app.playbackRepository.clearPosition(id)
             } else if (position >= 5_000) {
-                app.playbackRepository.savePosition(id, position, duration)
+                app.playbackRepository.savePosition(id, position, duration, serverId, path, name)
             }
         }
     }

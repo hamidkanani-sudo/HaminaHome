@@ -21,6 +21,17 @@ class PlaybackRepository(private val dataStore: DataStore<Preferences>) {
         val lastPlayedAt: Long
     )
 
+    /** An entry for the "Continue watching" row. */
+    data class RecentPlay(
+        val id: String,
+        val serverId: String,
+        val path: String,
+        val name: String,
+        val positionMs: Long,
+        val durationMs: Long,
+        val lastPlayedAt: Long
+    )
+
     suspend fun getPosition(mediaId: String): PlaybackInfo? {
         val raw = dataStore.data.first()[KEY_PLAYBACK] ?: return null
         return try {
@@ -59,7 +70,39 @@ class PlaybackRepository(private val dataStore: DataStore<Preferences>) {
         }
     }
 
-    suspend fun savePosition(mediaId: String, positionMs: Long, durationMs: Long) {
+    /** Most recently played, unfinished videos that have enough info to be started again. */
+    suspend fun getRecent(limit: Int = 12): List<RecentPlay> {
+        val raw = dataStore.data.first()[KEY_PLAYBACK] ?: return emptyList()
+        return try {
+            val root = JSONObject(raw)
+            val out = ArrayList<RecentPlay>()
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val o = root.optJSONObject(k) ?: continue
+                val sid = o.optString("sid", "")
+                val path = o.optString("path", "")
+                val name = o.optString("name", "")
+                val pos = o.optLong("pos", 0L)
+                val dur = o.optLong("dur", 0L)
+                if (sid.isEmpty() || path.isEmpty() || name.isEmpty()) continue
+                if (pos < 5_000 || (dur > 0 && dur - pos < 10_000)) continue
+                out.add(RecentPlay(k, sid, path, name, pos, dur, o.optLong("at", 0L)))
+            }
+            out.sortedByDescending { it.lastPlayedAt }.take(limit)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    suspend fun savePosition(
+        mediaId: String,
+        positionMs: Long,
+        durationMs: Long,
+        serverId: String = "",
+        path: String = "",
+        name: String = ""
+    ) {
         dataStore.edit { prefs ->
             val root = try {
                 JSONObject(prefs[KEY_PLAYBACK] ?: "{}")
@@ -70,6 +113,9 @@ class PlaybackRepository(private val dataStore: DataStore<Preferences>) {
                 put("pos", positionMs)
                 put("dur", durationMs)
                 put("at", System.currentTimeMillis())
+                if (serverId.isNotEmpty()) put("sid", serverId)
+                if (path.isNotEmpty()) put("path", path)
+                if (name.isNotEmpty()) put("name", name)
             })
             // Keep only last ~200 entries to avoid unbounded growth
             if (root.length() > 220) {

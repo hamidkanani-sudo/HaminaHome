@@ -88,6 +88,8 @@ class PhotoViewerActivity : ComponentActivity() {
                     .replace(Regex("[^A-Za-z0-9._-]"), "_")
                 val target = File(cacheDir, "photo_${System.currentTimeMillis()}_$safeName")
                 withContext(Dispatchers.IO) {
+                    // Remove copies left over from earlier photos so the cache does not grow forever.
+                    cacheDir.listFiles { f -> f.name.startsWith("photo_") }?.forEach { it.delete() }
                     stream.use { input -> FileOutputStream(target).use { output -> input.copyTo(output) } }
                 }
                 imageFile = target
@@ -97,6 +99,11 @@ class PhotoViewerActivity : ComponentActivity() {
                 loading = false
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (isFinishing) imageFile?.delete()
     }
 
     companion object {

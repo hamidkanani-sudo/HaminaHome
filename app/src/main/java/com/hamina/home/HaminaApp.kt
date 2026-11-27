@@ -13,6 +13,7 @@ import com.hamina.home.data.smb.SmbManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "hamina_settings")
 
@@ -44,6 +45,9 @@ class HaminaApp : Application() {
         serverRepository = ServerRepository(dataStore)
         playbackRepository = PlaybackRepository(dataStore)
         smbManager = SmbManager(this, cacheManager)
+
+        // Encrypt any plain-text SMB passwords saved by older versions.
+        applicationScope.launch { serverRepository.migratePasswordsIfNeeded() }
     }
 
     companion object {

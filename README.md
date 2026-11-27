@@ -4,7 +4,17 @@
 
 Hamina lets you browse video and photo files on Windows PCs and other SMB2/3 shares over your local network, using an Android TV remote.
 
-## Included in this revision
+## Changes in 1.2.0
+
+- Resume works: media ids are now stable (hash of server + path) instead of random UUIDs; resume info and "Last played" sorting are filled from saved positions.
+- Playback streams with the real file length and reads at the requested offset, so seeking works; special characters in file names are encoded safely; playing from "all shares" servers is fixed.
+- Player is re-created after Home/app switch; position is saved reliably (also when leaving with Back) and cleared when a video is watched to the end.
+- Retry works after a failed first connection; Back/Retry/focus are handled by a ViewModel (focus returns to the folder you came from; state survives configuration changes).
+- SMB passwords are encrypted with the Android Keystore (existing passwords are migrated on first launch); backups, cleartext traffic and storage permissions are disabled/removed.
+- SMB file handles and share connections are closed; sessions are refreshed when server settings change.
+- Folder cache uses JSON; natural sort ("Episode 2" before "Episode 10"); Windows system folders are hidden; unused dependencies removed.
+
+## Included in the previous revision
 
 - Android TV Leanback launcher entry with a dedicated TV banner and Hamina launcher icon.
 - Hamina splash artwork as the launch window background.

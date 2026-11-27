@@ -8,12 +8,16 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import com.hamina.home.data.model.SmbServer
 import java.io.IOException
-import java.io.InputStream
 
 /**
  * Media3 DataSource that streams a file from an SMB share.
- * This allows ExoPlayer to play videos directly from the network share
- * without downloading the whole file first.
+ *
+ * - Reports the real file length, so ExoPlayer can seek (MP4 with moov at the end, MKV cues, ...).
+ * - Reads directly at the requested offset instead of skipping through a stream.
+ * - Reads in large chunks to avoid many tiny SMB round-trips.
+ *
+ * URI format: smb://host/<path as returned in MediaItem.path, percent-encoded>.
+ * Use [buildUri] to create it so special characters (#, ?, %, spaces, Persian names) are safe.
  */
 @UnstableApi
 class SmbDataSource(
@@ -21,70 +25,80 @@ class SmbDataSource(
     private val server: SmbServer
 ) : BaseDataSource(/* isNetwork = */ true) {
 
-    private var inputStream: InputStream? = null
+    private var handle: SmbFileHandle? = null
     private var uri: Uri? = null
-    private var bytesRemaining: Long = 0
     private var opened = false
 
+    private var position = 0L        // file offset of the next unread byte
+    private var bytesRemaining = 0L
+
+    private val buffer = ByteArray(BUFFER_SIZE)
+    private var bufferLength = 0
+    private var bufferPos = 0
+
     override fun open(dataSpec: DataSpec): Long {
+        transferInitializing(dataSpec)
         uri = dataSpec.uri
-        // Expected URI format: smb://host/share/path/to/file
-        val path = extractPath(dataSpec.uri)
+        val path = pathFromUri(dataSpec.uri)
             ?: throw IOException("Invalid SMB URI: ${dataSpec.uri}")
 
-        // We open the stream on a background thread via runBlocking-style call
-        // because Media3 open() is allowed to block.
-        val result = kotlinx.coroutines.runBlocking {
-            smbManager.openFileStream(server, path)
-        }
-        val stream = result.getOrElse { throw IOException("SMB open failed", it) }
+        val h = smbManager.openFileHandle(server, path)
+            .getOrElse { throw IOException("SMB open failed: ${it.message}", it) }
 
-        // Handle position for seeking
-        if (dataSpec.position > 0) {
-            var skipped = 0L
-            while (skipped < dataSpec.position) {
-                val s = stream.skip(dataSpec.position - skipped)
-                if (s <= 0) break
-                skipped += s
-            }
+        val size = h.size
+        if (dataSpec.position > size) {
+            h.close()
+            throw IOException("Requested position ${dataSpec.position} is beyond file size $size")
         }
-
-        inputStream = stream
+        val remainingInFile = size - dataSpec.position
         bytesRemaining = if (dataSpec.length != C.LENGTH_UNSET.toLong()) {
-            dataSpec.length
+            minOf(dataSpec.length, remainingInFile)
         } else {
-            C.LENGTH_UNSET.toLong()
+            remainingInFile
         }
+
+        handle = h
+        position = dataSpec.position
+        bufferLength = 0
+        bufferPos = 0
         opened = true
         transferStarted(dataSpec)
         return bytesRemaining
     }
 
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+    override fun read(target: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
+        val h = handle ?: throw IOException("SMB file is not open")
 
-        val toRead = if (bytesRemaining == C.LENGTH_UNSET.toLong()) length
-                     else minOf(length.toLong(), bytesRemaining).toInt()
+        if (bufferPos >= bufferLength) {
+            val toFetch = minOf(BUFFER_SIZE.toLong(), bytesRemaining).toInt()
+            val n = h.read(position, buffer, 0, toFetch)
+            if (n <= 0) return C.RESULT_END_OF_INPUT
+            bufferLength = n
+            bufferPos = 0
+        }
 
-        val read = inputStream?.read(buffer, offset, toRead) ?: -1
-        if (read == -1) {
-            return C.RESULT_END_OF_INPUT
-        }
-        if (bytesRemaining != C.LENGTH_UNSET.toLong()) {
-            bytesRemaining -= read
-        }
-        bytesTransferred(read)
-        return read
+        val available = bufferLength - bufferPos
+        val n = minOf(length, available, minOf(bytesRemaining, Int.MAX_VALUE.toLong()).toInt())
+        System.arraycopy(buffer, bufferPos, target, offset, n)
+        bufferPos += n
+        position += n
+        bytesRemaining -= n
+        bytesTransferred(n)
+        return n
     }
 
     override fun getUri(): Uri? = uri
 
     override fun close() {
         try {
-            inputStream?.close()
+            handle?.close()
         } finally {
-            inputStream = null
+            handle = null
+            bufferLength = 0
+            bufferPos = 0
+            uri = null
             if (opened) {
                 opened = false
                 transferEnded()
@@ -92,20 +106,30 @@ class SmbDataSource(
         }
     }
 
-    private fun extractPath(uri: Uri): String? {
-        // smb://host/share/folder/file.mkv  →  folder/file.mkv
-        val path = uri.path ?: return null
-        // path starts with /share/...
-        val parts = path.trimStart('/').split("/", limit = 2)
-        return if (parts.size >= 2) parts[1] else parts.getOrNull(0)
-    }
-
     class Factory(
         private val smbManager: SmbManager,
         private val server: SmbServer
     ) : DataSource.Factory {
-        override fun createDataSource(): DataSource {
-            return SmbDataSource(smbManager, server)
+        override fun createDataSource(): DataSource = SmbDataSource(smbManager, server)
+    }
+
+    companion object {
+        private const val BUFFER_SIZE = 512 * 1024
+
+        /** Builds a safe media URI for a MediaItem.path of the given server. */
+        fun buildUri(server: SmbServer, path: String): Uri {
+            val builder = Uri.Builder().scheme("smb").authority(server.host)
+            path.replace('\\', '/')
+                .split('/')
+                .filter { it.isNotEmpty() }
+                .forEach { builder.appendPath(it) }
+            return builder.build()
+        }
+
+        private fun pathFromUri(uri: Uri): String? {
+            val segments = uri.pathSegments
+            if (segments.isEmpty()) return null
+            return segments.joinToString("/")
         }
     }
 }

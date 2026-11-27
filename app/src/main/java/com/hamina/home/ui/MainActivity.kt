@@ -2,63 +2,59 @@ package com.hamina.home.ui
 
 import android.content.Intent
 import android.os.Bundle
+import android.view.KeyEvent as AndroidKeyEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.combinedClickable
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import android.view.KeyEvent as AndroidKeyEvent
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.lifecycleScope
-import com.hamina.home.HaminaApp
 import com.hamina.home.data.model.MediaItem
-import com.hamina.home.data.model.SmbServer
-import com.hamina.home.data.model.SortMode
-import com.hamina.home.data.model.ViewMode
+import com.hamina.home.player.PhotoViewerActivity
 import com.hamina.home.player.PlayerActivity
-import kotlinx.coroutines.launch
 
 /**
- * Main browser for Hamina Home.
- * Supports:
- * - Multiple SMB servers
- * - Folder navigation with cache
- * - List view (grid foundation ready)
- * - Left details panel
- * - Predictable Back button
- * - Launch built-in player
- * - Basic add-server flow (via simple dialog later)
+ * Main browser for Hamina Home. All navigation state lives in [BrowserViewModel].
  */
 class MainActivity : ComponentActivity() {
 
-    private val app get() = HaminaApp.instance
-
-    // Navigation state held outside Compose so Back key can access it
-    private var navServer: SmbServer? = null
-    private var navPath: String = ""
-    private var pathStack = mutableListOf<String>() // for proper up navigation
+    private val vm: BrowserViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,104 +63,54 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    @Composable
-    private fun HaminaHomeScreen() {
-        var servers by remember { mutableStateOf<List<SmbServer>>(emptyList()) }
-        var items by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
-        var selectedIndex by remember { mutableStateOf(0) }
-        var selectedItem by remember { mutableStateOf<MediaItem?>(null) }
-        var isLoading by remember { mutableStateOf(false) }
-        var errorMessage by remember { mutableStateOf<String?>(null) }
-        var viewMode by remember { mutableStateOf(ViewMode.LIST) }
-        var sortMode by remember { mutableStateOf(SortMode.NAME_ASC) }
-        // null = form hidden; non-null existing server = edit; use a sentinel for "add"
-        var serverFormTarget by remember { mutableStateOf<SmbServer?>(null) }
-        var showServerForm by remember { mutableStateOf(false) }
-        var isEditMode by remember { mutableStateOf(false) }
+    override fun onResume() {
+        super.onResume()
+        vm.refreshPlayback()
+    }
 
-        // Load servers & settings
-        LaunchedEffect(Unit) {
-            app.serverRepository.servers.collect { servers = it }
-        }
-        LaunchedEffect(Unit) {
-            app.settingsRepository.viewMode.collect { viewMode = it }
-        }
-        LaunchedEffect(Unit) {
-            app.settingsRepository.sortMode.collect { sortMode = it }
-        }
-
-        // Full-screen add/edit form (TV-friendly, all fields focusable)
-        if (showServerForm) {
-            AddServerScreen(
-                existing = if (isEditMode) serverFormTarget else null,
-                onDismiss = { showServerForm = false },
-                onSaved = { showServerForm = false }
-            )
-            return
-        }
-
-        fun loadFolder(server: SmbServer, path: String, force: Boolean = false) {
-            isLoading = true
-            errorMessage = null
-            lifecycleScope.launch {
-                val result = app.smbManager.listDirectory(server, path, force)
-                isLoading = false
-                result.onSuccess { list ->
-                    items = sortItems(list, sortMode)
-                    navServer = server
-                    navPath = path
-                    selectedIndex = 0
-                    selectedItem = items.firstOrNull()
-                }.onFailure {
-                    errorMessage = it.message ?: "Network error. Check connection."
-                    items = emptyList()
-                }
-            }
-        }
-
-        fun openItem(item: MediaItem) {
-            val server = navServer ?: return
-            if (item.isDirectory) {
-                pathStack.add(navPath)
-                loadFolder(server, item.path)
-            } else if (item.isVideo) {
-                val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
+    private fun openItem(item: MediaItem, index: Int) {
+        val server = vm.currentServer ?: return
+        when {
+            item.isDirectory -> vm.openFolder(item, index)
+            item.isVideo -> {
+                val intent = Intent(this, PlayerActivity::class.java).apply {
                     putExtra(PlayerActivity.EXTRA_SERVER_ID, server.id)
                     putExtra(PlayerActivity.EXTRA_PATH, item.path)
                     putExtra(PlayerActivity.EXTRA_NAME, item.name)
                     putExtra(PlayerActivity.EXTRA_MEDIA_ID, item.id)
                 }
                 startActivity(intent)
-            } else if (item.isImage) {
-                val intent = Intent(this@MainActivity, com.hamina.home.player.PhotoViewerActivity::class.java).apply {
-                    putExtra(com.hamina.home.player.PhotoViewerActivity.EXTRA_SERVER_ID, server.id)
-                    putExtra(com.hamina.home.player.PhotoViewerActivity.EXTRA_PATH, item.path)
-                    putExtra(com.hamina.home.player.PhotoViewerActivity.EXTRA_NAME, item.name)
+            }
+            item.isImage -> {
+                val intent = Intent(this, PhotoViewerActivity::class.java).apply {
+                    putExtra(PhotoViewerActivity.EXTRA_SERVER_ID, server.id)
+                    putExtra(PhotoViewerActivity.EXTRA_PATH, item.path)
+                    putExtra(PhotoViewerActivity.EXTRA_NAME, item.name)
                 }
                 startActivity(intent)
-            } else {
-                Toast.makeText(this@MainActivity, "Unsupported file type", Toast.LENGTH_SHORT).show()
             }
+            else -> Toast.makeText(this, "Unsupported file type", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    @Composable
+    private fun HaminaHomeScreen() {
+        // Full-screen add/edit form (TV-friendly, all fields focusable)
+        if (vm.showServerForm) {
+            AddServerScreen(
+                existing = vm.formServer,
+                onDismiss = { vm.hideServerForm() },
+                onSaved = { vm.hideServerForm() }
+            )
+            return
         }
 
-        fun goUp() {
-            if (pathStack.isNotEmpty()) {
-                val parent = pathStack.removeAt(pathStack.lastIndex)
-                navServer?.let { loadFolder(it, parent) }
-            } else if (navServer != null) {
-                // Back to server list
-                navServer = null
-                navPath = ""
-                items = emptyList()
-                selectedItem = null
-            } else {
-                // Already at root – exit or minimize
-                finish()
-            }
-        }
+        // Back goes up one folder, then to the server list, then leaves the app.
+        BackHandler(enabled = vm.currentServer != null) { vm.goUp() }
 
-        // Android TV Back navigates to the parent folder before leaving the server.
-        BackHandler(enabled = navServer != null) { goUp() }
+        val server = vm.currentServer
+        val selected = vm.selectedItem
+        val addServerFocus = remember { FocusRequester() }
 
         Row(
             modifier = Modifier
@@ -179,16 +125,12 @@ class MainActivity : ComponentActivity() {
                     .background(Color(0xFF161616))
                     .padding(20.dp)
             ) {
-                Text(
-                    text = "Hamina Home",
-                    color = Color(0xFF42A5F5),
-                    fontSize = 24.sp
-                )
+                Text(text = "Hamina Home", color = Color(0xFF42A5F5), fontSize = 24.sp)
                 Spacer(Modifier.height(20.dp))
 
-                if (selectedItem != null) {
+                if (selected != null) {
                     Text(
-                        text = selectedItem!!.name,
+                        text = selected.name,
                         color = Color.White,
                         fontSize = 18.sp,
                         maxLines = 3,
@@ -197,15 +139,15 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(12.dp))
                     Text(
                         text = when {
-                            selectedItem!!.isDirectory -> "Folder"
-                            selectedItem!!.isVideo -> "Video • ${formatSize(selectedItem!!.size)}"
-                            selectedItem!!.isImage -> "Image • ${formatSize(selectedItem!!.size)}"
-                            else -> formatSize(selectedItem!!.size)
+                            selected.isDirectory -> "Folder"
+                            selected.isVideo -> "Video • ${formatSize(selected.size)}"
+                            selected.isImage -> "Image • ${formatSize(selected.size)}"
+                            else -> formatSize(selected.size)
                         },
                         color = Color(0xFFAAAAAA),
                         fontSize = 14.sp
                     )
-                    if (selectedItem!!.lastPlayedPosition > 0) {
+                    if (selected.lastPlayedPosition > 0) {
                         Spacer(Modifier.height(8.dp))
                         Text(
                             text = "▶ Resume available",
@@ -213,48 +155,33 @@ class MainActivity : ComponentActivity() {
                             fontSize = 13.sp
                         )
                     }
-                } else if (navServer == null) {
+                } else if (server == null) {
                     Text(
                         text = "Select a server\nor add a new one",
                         color = Color.Gray,
                         fontSize = 15.sp
                     )
                 } else {
-                    Text(
-                        text = "Select a file",
-                        color = Color.Gray,
-                        fontSize = 15.sp
-                    )
+                    Text(text = "Select a file", color = Color.Gray, fontSize = 15.sp)
                 }
 
                 Spacer(Modifier.weight(1f))
+                if (server != null) {
+                    Text(
+                        text = "Refresh folder  (OK)",
+                        color = Color(0xFF90CAF9),
+                        fontSize = 13.sp,
+                        modifier = Modifier
+                            .clickable { vm.refresh() }
+                            .padding(vertical = 6.dp)
+                    )
+                }
                 Text(
-                    text = if (viewMode == ViewMode.LIST) "View: List  (OK to switch)" else "View: Grid  (OK to switch)",
+                    text = "Sort: ${vm.sortMode.name.replace('_', ' ').lowercase()}  (OK to change)",
                     color = Color(0xFF90CAF9),
                     fontSize = 13.sp,
                     modifier = Modifier
-                        .focusable()
-                        .clickable {
-                            val next = if (viewMode == ViewMode.LIST) ViewMode.GRID else ViewMode.LIST
-                            viewMode = next
-                            lifecycleScope.launch { app.settingsRepository.setViewMode(next) }
-                        }
-                        .padding(vertical = 6.dp)
-                )
-                Text(
-                    text = "Sort: ${sortMode.name.replace('_', ' ').lowercase()}  (OK to change)",
-                    color = Color(0xFF90CAF9),
-                    fontSize = 13.sp,
-                    modifier = Modifier
-                        .focusable()
-                        .clickable {
-                            val modes = SortMode.values()
-                            val idx = modes.indexOf(sortMode)
-                            val next = modes[(idx + 1) % modes.size]
-                            sortMode = next
-                            items = sortItems(items, next)
-                            lifecycleScope.launch { app.settingsRepository.setSortMode(next) }
-                        }
+                        .clickable { vm.cycleSort() }
                         .padding(vertical = 6.dp)
                 )
             }
@@ -266,12 +193,11 @@ class MainActivity : ComponentActivity() {
                     .fillMaxHeight()
                     .padding(16.dp)
             ) {
-                // Header
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     val title = when {
-                        navServer == null -> "Servers"
-                        navPath.isEmpty() -> navServer!!.name
-                        else -> navPath.substringAfterLast('/')
+                        server == null -> "Servers"
+                        vm.currentPath.isEmpty() -> server.name
+                        else -> vm.currentPath.substringAfterLast('/')
                     }
                     Text(
                         text = title,
@@ -279,17 +205,14 @@ class MainActivity : ComponentActivity() {
                         fontSize = 22.sp,
                         modifier = Modifier.weight(1f)
                     )
-                    if (navServer == null) {
+                    if (server == null) {
                         Text(
                             text = "+ Add Server",
                             color = Color(0xFF66BB6A),
                             fontSize = 16.sp,
                             modifier = Modifier
-                                .clickable {
-                                    isEditMode = false
-                                    serverFormTarget = null
-                                    showServerForm = true
-                                }
+                                .focusRequester(addServerFocus)
+                                .clickable { vm.showAddServer() }
                                 .padding(8.dp)
                         )
                     }
@@ -297,89 +220,129 @@ class MainActivity : ComponentActivity() {
 
                 Spacer(Modifier.height(12.dp))
 
+                val error = vm.errorMessage
                 when {
-                    isLoading -> {
+                    vm.isLoading -> {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             CircularProgressIndicator(color = Color(0xFF42A5F5))
                         }
                     }
-                    errorMessage != null -> {
+                    error != null -> {
+                        val retryFocus = remember { FocusRequester() }
+                        LaunchedEffect(error) {
+                            withFrameNanos { }
+                            try {
+                                retryFocus.requestFocus()
+                            } catch (_: Exception) {
+                            }
+                        }
                         Column(
                             Modifier.fillMaxSize(),
                             verticalArrangement = Arrangement.Center,
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Text(errorMessage!!, color = Color(0xFFEF5350), fontSize = 16.sp)
+                            Text(error, color = Color(0xFFEF5350), fontSize = 16.sp)
                             Spacer(Modifier.height(20.dp))
                             Text(
                                 text = "Retry",
                                 color = Color(0xFF42A5F5),
                                 fontSize = 18.sp,
                                 modifier = Modifier
-                                    .clickable { navServer?.let { loadFolder(it, navPath, force = true) } }
+                                    .focusRequester(retryFocus)
+                                    .clickable { vm.retry() }
                                     .padding(12.dp)
+                            )
+                            Text(
+                                text = "Press Back to return",
+                                color = Color.Gray,
+                                fontSize = 13.sp
                             )
                         }
                     }
-                    navServer == null -> {
-                        if (servers.isEmpty()) {
+                    server == null -> {
+                        if (vm.servers.isEmpty()) {
+                            LaunchedEffect(Unit) {
+                                withFrameNanos { }
+                                try {
+                                    addServerFocus.requestFocus()
+                                } catch (_: Exception) {
+                                }
+                            }
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text(
-                                    text = "No servers configured.\n\nPress + Add Server\nor long-press to add one.",
+                                    text = "No servers configured.\n\nSelect + Add Server above.",
                                     color = Color.Gray,
                                     fontSize = 16.sp
                                 )
                             }
                         } else {
-                            val listState = rememberLazyListState()
-                            LazyColumn(state = listState) {
-                                itemsIndexed(servers) { index, server ->
-                                    FocusableRow(
-                                        text = "▶  ${server.name}",
-                                        subText = if (server.share.isBlank()) "${server.host}  (all shares)" else "${server.host} / ${server.share}",
-                                        isSelected = selectedIndex == index,
-                                        onFocus = {
-                                            selectedIndex = index
-                                            selectedItem = null
-                                        },
-                                        onClick = {
-                                            pathStack.clear()
-                                            loadFolder(server, "")
-                                        },
-                                        onLongClick = {
-                                            isEditMode = true
-                                            serverFormTarget = server
-                                            showServerForm = true
-                                        }
-                                    )
-                                }
+                            TvList(vm.servers) { index, s, requester ->
+                                FocusableRow(
+                                    text = "▶  ${s.name}",
+                                    subText = if (s.share.isBlank()) {
+                                        "${s.host}  (all shares)"
+                                    } else {
+                                        "${s.host} / ${s.share}"
+                                    },
+                                    isSelected = vm.focusIndex == index,
+                                    focusRequester = requester,
+                                    onFocus = { vm.focusIndex = index },
+                                    onClick = { vm.openServer(s, index) },
+                                    onLongClick = { vm.showEditServer(s) }
+                                )
                             }
                         }
                     }
                     else -> {
-                        if (items.isEmpty()) {
+                        if (vm.items.isEmpty()) {
                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("This folder is empty", color = Color.Gray, fontSize = 16.sp)
                             }
                         } else {
-                            val listState = rememberLazyListState()
-                            LazyColumn(state = listState) {
-                                itemsIndexed(items) { index, item ->
-                                    FocusableRow(
-                                        text = "${iconFor(item)}  ${item.name}",
-                                        subText = if (item.isDirectory) "Folder" else formatSize(item.size),
-                                        isSelected = selectedIndex == index,
-                                        onFocus = {
-                                            selectedIndex = index
-                                            selectedItem = item
-                                        },
-                                        onClick = { openItem(item) }
-                                    )
-                                }
+                            TvList(vm.items) { index, item, requester ->
+                                FocusableRow(
+                                    text = "${iconFor(item)}  ${item.name}",
+                                    subText = if (item.isDirectory) "Folder" else formatSize(item.size),
+                                    isSelected = vm.focusIndex == index,
+                                    focusRequester = requester,
+                                    onFocus = { vm.focusIndex = index },
+                                    onClick = { openItem(item, index) }
+                                )
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * Lazy list that puts focus back on [BrowserViewModel.focusIndex] whenever the view model asks
+     * (after loading a folder, going back, closing the form, ...).
+     */
+    @Composable
+    private fun <T> TvList(
+        entries: List<T>,
+        row: @Composable (index: Int, entry: T, focusRequester: FocusRequester) -> Unit
+    ) {
+        val listState = rememberLazyListState()
+        val requesters = remember(entries.size) { List(entries.size) { FocusRequester() } }
+
+        LaunchedEffect(vm.focusToken, entries.size) {
+            if (entries.isEmpty()) return@LaunchedEffect
+            val index = vm.focusIndex.coerceIn(0, entries.lastIndex)
+            listState.scrollToItem((index - 2).coerceAtLeast(0))
+            withFrameNanos { }
+            try {
+                requesters[index].requestFocus()
+            } catch (_: Exception) {
+                // Row not attached yet; the user can still navigate with the D-pad.
+            }
+        }
+
+        LazyColumn(state = listState) {
+            itemsIndexed(entries) { index, entry ->
+                row(index, entry, requesters[index])
             }
         }
     }
@@ -389,6 +352,7 @@ class MainActivity : ComponentActivity() {
         text: String,
         subText: String,
         isSelected: Boolean,
+        focusRequester: FocusRequester,
         onFocus: () -> Unit,
         onClick: () -> Unit,
         onLongClick: () -> Unit = {}
@@ -402,8 +366,7 @@ class MainActivity : ComponentActivity() {
                 .onFocusChanged { if (it.isFocused) onFocus() }
                 .onPreviewKeyEvent { event ->
                     if (event.type == KeyEventType.KeyUp) {
-                        val code = event.nativeKeyEvent.keyCode
-                        when (code) {
+                        when (event.nativeKeyEvent.keyCode) {
                             AndroidKeyEvent.KEYCODE_DPAD_CENTER,
                             AndroidKeyEvent.KEYCODE_ENTER -> {
                                 onClick(); true
@@ -416,6 +379,7 @@ class MainActivity : ComponentActivity() {
                         }
                     } else false
                 }
+                .focusRequester(focusRequester)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .background(bg)
                 .border(2.dp, borderColor)
@@ -429,11 +393,7 @@ class MainActivity : ComponentActivity() {
                 overflow = TextOverflow.Ellipsis
             )
             if (subText.isNotBlank()) {
-                Text(
-                    text = subText,
-                    color = Color(0xFFAAAAAA),
-                    fontSize = 13.sp
-                )
+                Text(text = subText, color = Color(0xFFAAAAAA), fontSize = 13.sp)
             }
         }
     }
@@ -446,26 +406,10 @@ class MainActivity : ComponentActivity() {
         else -> "📄"
     }
 
-    private fun sortItems(list: List<MediaItem>, mode: SortMode): List<MediaItem> {
-        val dirsFirst = compareBy<MediaItem> { !it.isDirectory }
-        return when (mode) {
-            SortMode.NAME_ASC -> list.sortedWith(dirsFirst.thenBy { it.name.lowercase() })
-            SortMode.NAME_DESC -> list.sortedWith(dirsFirst.thenByDescending { it.name.lowercase() })
-            SortMode.DATE_ASC -> list.sortedWith(dirsFirst.thenBy { it.lastModified })
-            SortMode.DATE_DESC -> list.sortedWith(dirsFirst.thenByDescending { it.lastModified })
-            SortMode.SIZE_ASC -> list.sortedWith(dirsFirst.thenBy { it.size })
-            SortMode.SIZE_DESC -> list.sortedWith(dirsFirst.thenByDescending { it.size })
-            SortMode.LAST_PLAYED -> list.sortedWith(
-                dirsFirst.thenByDescending { it.lastPlayedAt }
-            )
-        }
-    }
-
     private fun formatSize(bytes: Long): String {
         if (bytes < 1024) return "$bytes B"
         if (bytes < 1024 * 1024) return "%.1f KB".format(bytes / 1024.0)
         if (bytes < 1024 * 1024 * 1024) return "%.1f MB".format(bytes / (1024.0 * 1024))
         return "%.2f GB".format(bytes / (1024.0 * 1024 * 1024))
     }
-
 }

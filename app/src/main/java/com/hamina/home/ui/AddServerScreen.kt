@@ -213,6 +213,7 @@ fun AddServerScreen(
                         primary = false,
                         onClick = {
                             scope.launch {
+                                HaminaApp.instance.smbManager.evict(existing.id)
                                 HaminaApp.instance.serverRepository.deleteServer(existing.id)
                                 Toast.makeText(context, "Connection deleted", Toast.LENGTH_SHORT).show()
                                 onSaved()

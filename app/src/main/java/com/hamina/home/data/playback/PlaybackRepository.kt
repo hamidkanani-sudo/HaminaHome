@@ -37,6 +37,28 @@ class PlaybackRepository(private val dataStore: DataStore<Preferences>) {
         }
     }
 
+    /** All saved positions keyed by media id (used to show resume info in folder listings). */
+    suspend fun getAll(): Map<String, PlaybackInfo> {
+        val raw = dataStore.data.first()[KEY_PLAYBACK] ?: return emptyMap()
+        return try {
+            val root = JSONObject(raw)
+            val out = HashMap<String, PlaybackInfo>()
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val o = root.optJSONObject(k) ?: continue
+                out[k] = PlaybackInfo(
+                    positionMs = o.optLong("pos", 0L),
+                    durationMs = o.optLong("dur", 0L),
+                    lastPlayedAt = o.optLong("at", 0L)
+                )
+            }
+            out
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
     suspend fun savePosition(mediaId: String, positionMs: Long, durationMs: Long) {
         dataStore.edit { prefs ->
             val root = try {

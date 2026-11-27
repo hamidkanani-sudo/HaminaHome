@@ -6,6 +6,7 @@ import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -47,11 +48,14 @@ class PlayerActivity : ComponentActivity() {
 
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
-    private var subtitleOffsetMs: Long = 0L
     private var mediaId: String = ""
     private var saveJob: Job? = null
     private var currentServer: SmbServer? = null
     private var currentPath: String = ""
+    private var aspectRatio: AspectRatio = AspectRatio.FIT
+
+    /** Position to continue from when the player is re-created (e.g. after Home -> back to the app). */
+    private var resumeFromMs: Long = -1L
 
     private val app get() = HaminaApp.instance
 
@@ -73,65 +77,83 @@ class PlayerActivity : ComponentActivity() {
                 finish()
                 return@launch
             }
-            val settings = app.settingsRepository.playerSettings.first()
-            subtitleOffsetMs = settings.subtitleOffsetMs
-            setupPlayer(settings.aspectRatio)
+            aspectRatio = app.settingsRepository.playerSettings.first().aspectRatio
+            ensurePlayer()
         }
     }
 
-    private fun setupPlayer(aspectRatio: AspectRatio) {
-        val server = currentServer ?: return
+    override fun onStart() {
+        super.onStart()
+        // The player is released in onStop, so it must be created again here.
+        ensurePlayer()
+    }
 
+    private fun ensurePlayer() {
+        if (player != null) return
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
+        val server = currentServer ?: return
+        setupPlayer(server)
+    }
+
+    private fun setupPlayer(server: SmbServer) {
         val dataSourceFactory = SmbDataSource.Factory(app.smbManager, server)
         val mediaSourceFactory = DefaultMediaSourceFactory(this)
             .setDataSourceFactory(dataSourceFactory)
 
-        player = ExoPlayer.Builder(this)
+        val exo = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
             .build()
-            .also { exo ->
-                playerView?.player = exo
-                applyAspectRatio(aspectRatio)
+        player = exo
+        playerView?.player = exo
+        applyAspectRatio(aspectRatio)
 
-                exo.addListener(object : Player.Listener {
-                    override fun onPlayerError(error: PlaybackException) {
-                        Log.e(TAG, "Playback error", error)
-                        Toast.makeText(
-                            this@PlayerActivity,
-                            "Playback error: ${error.message}",
-                            Toast.LENGTH_LONG
-                        ).show()
-                    }
-                })
+        exo.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                Log.e(TAG, "Playback error", error)
+                Toast.makeText(
+                    this@PlayerActivity,
+                    "Playback error: ${error.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        })
 
-                val mediaItem = MediaItem.Builder()
-                    .setUri("smb://${server.host}/${server.share}/$currentPath")
-                    .setMediaId(mediaId)
-                    .build()
+        val mediaItem = MediaItem.Builder()
+            .setUri(SmbDataSource.buildUri(server, currentPath))
+            .setMediaId(mediaId)
+            .build()
 
-                exo.setMediaItem(mediaItem)
-                exo.prepare()
+        exo.setMediaItem(mediaItem)
+        exo.prepare()
 
-                lifecycleScope.launch {
-                    val info = app.playbackRepository.getPosition(mediaId)
-                    if (info != null && info.positionMs > 5_000 && info.positionMs < (info.durationMs - 10_000)) {
-                        exo.seekTo(info.positionMs)
-                        Toast.makeText(
-                            this@PlayerActivity,
-                            "Resuming from ${formatTime(info.positionMs)}",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                    exo.playWhenReady = true
-                }
-
-                saveJob = lifecycleScope.launch {
-                    while (isActive) {
-                        delay(8_000)
-                        saveCurrentPosition()
-                    }
+        lifecycleScope.launch {
+            val pending = resumeFromMs
+            if (pending > 0) {
+                resumeFromMs = -1L
+                if (player === exo) exo.seekTo(pending)
+            } else {
+                val info = app.playbackRepository.getPosition(mediaId)
+                if (player === exo && info != null &&
+                    info.positionMs > 5_000 && info.positionMs < (info.durationMs - 10_000)
+                ) {
+                    exo.seekTo(info.positionMs)
+                    Toast.makeText(
+                        this@PlayerActivity,
+                        "Resuming from ${formatTime(info.positionMs)}",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
             }
+            if (player === exo) exo.playWhenReady = true
+        }
+
+        saveJob?.cancel()
+        saveJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(8_000)
+                player?.let { persistPosition(it.currentPosition, it.duration) }
+            }
+        }
     }
 
     private fun applyAspectRatio(ratio: AspectRatio) {
@@ -144,13 +166,20 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    private fun saveCurrentPosition() {
-        val p = player ?: return
-        if (p.duration <= 0 || mediaId.isBlank()) return
-        val pos = p.currentPosition
-        val dur = p.duration
-        lifecycleScope.launch {
-            app.playbackRepository.savePosition(mediaId, pos, dur)
+    /**
+     * Saves the position in the application scope: an activity-scoped coroutine can be cancelled
+     * by finish() before the write completes, which silently loses the resume position.
+     */
+    private fun persistPosition(position: Long, duration: Long) {
+        if (mediaId.isBlank() || duration <= 0 || duration == C.TIME_UNSET) return
+        val id = mediaId
+        app.applicationScope.launch {
+            if (duration - position < 10_000) {
+                // Watched to the end: do not offer to resume.
+                app.playbackRepository.clearPosition(id)
+            } else if (position >= 5_000) {
+                app.playbackRepository.savePosition(id, position, duration)
+            }
         }
     }
 
@@ -174,8 +203,7 @@ class PlayerActivity : ComponentActivity() {
                 return true
             }
             KeyEvent.KEYCODE_BACK -> {
-                saveCurrentPosition()
-                finish()
+                finish() // position is saved in onStop
                 return true
             }
             KeyEvent.KEYCODE_MEDIA_AUDIO_TRACK -> {
@@ -214,9 +242,16 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        saveCurrentPosition()
+        val p = player
+        if (p != null) {
+            val position = p.currentPosition
+            if (position > 0) resumeFromMs = position
+            persistPosition(position, p.duration)
+        }
         saveJob?.cancel()
-        player?.release()
+        saveJob = null
+        playerView?.player = null
+        p?.release()
         player = null
     }
 }

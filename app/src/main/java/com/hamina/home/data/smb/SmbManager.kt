@@ -5,6 +5,8 @@ import android.util.Log
 import com.hamina.home.data.cache.CacheManager
 import com.hamina.home.data.model.MediaItem
 import com.hamina.home.data.model.SmbServer
+import com.hamina.home.util.Ids
+import com.hamina.home.util.NaturalOrder
 import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.mssmb2.SMB2CreateDisposition
@@ -15,12 +17,68 @@ import com.hierynomus.smbj.auth.AuthenticationContext
 import com.hierynomus.smbj.connection.Connection
 import com.hierynomus.smbj.session.Session
 import com.hierynomus.smbj.share.DiskShare
+import com.hierynomus.smbj.share.File as SmbFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.Closeable
+import java.io.IOException
+import java.io.InputStream
 import java.util.EnumSet
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+
+/**
+ * An open remote file. Supports reading at an arbitrary offset (needed for seeking in video)
+ * and releases both the file handle and its share connection on [close].
+ */
+class SmbFileHandle internal constructor(
+    private val share: DiskShare,
+    private val file: SmbFile,
+    val size: Long
+) : Closeable {
+
+    fun read(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+        return try {
+            file.read(buffer, position, offset, length)
+        } catch (e: Exception) {
+            throw IOException("SMB read failed: ${e.message}", e)
+        }
+    }
+
+    /** Sequential stream view; closing the stream closes the file and share. */
+    fun inputStream(): InputStream = object : InputStream() {
+        private var pos = 0L
+
+        override fun read(): Int {
+            val one = ByteArray(1)
+            val n = read(one, 0, 1)
+            return if (n <= 0) -1 else one[0].toInt() and 0xFF
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            val n = this@SmbFileHandle.read(pos, b, off, minOf(len, 512 * 1024))
+            if (n <= 0) return -1
+            pos += n
+            return n
+        }
+
+        override fun close() {
+            this@SmbFileHandle.close()
+        }
+    }
+
+    override fun close() {
+        try {
+            file.close()
+        } catch (_: Exception) {
+        }
+        try {
+            share.close()
+        } catch (_: Exception) {
+        }
+    }
+}
 
 class SmbManager(
     private val context: Context,
@@ -36,7 +94,14 @@ class SmbManager(
         SMBClient(config)
     }
 
-    private val sessions = ConcurrentHashMap<String, Pair<Connection, Session>>()
+    private class SessionEntry(
+        val connection: Connection,
+        val session: Session,
+        val fingerprint: String
+    )
+
+    private val sessions = ConcurrentHashMap<String, SessionEntry>()
+    private val sessionLock = Any()
 
     companion object {
         private const val TAG = "HaminaSMB"
@@ -86,15 +151,13 @@ class SmbManager(
                 val files = diskShare.list(remotePath)
 
                 val items = files
-                    .filter { f ->
-                        f.fileName != "." && f.fileName != ".." && !f.fileName.startsWith(".")
-                    }
+                    .filter { f -> !isHiddenName(f.fileName) }
                     .map { f ->
                         // smbj exposes fileAttributes as a Long bitmask, not a Set
                         val isDir = (f.fileAttributes and FileAttributes.FILE_ATTRIBUTE_DIRECTORY.value) != 0L
                         val childPath = buildChildPath(server, shareName, remotePath, f.fileName)
                         MediaItem(
-                            id = UUID.randomUUID().toString(),
+                            id = Ids.mediaId(server.id, childPath),
                             name = f.fileName,
                             path = childPath,
                             isDirectory = isDir,
@@ -109,7 +172,8 @@ class SmbManager(
                         )
                     }
                     .sortedWith(
-                        compareBy<MediaItem> { !it.isDirectory }.thenBy { it.name.lowercase() }
+                        compareBy<MediaItem> { !it.isDirectory }
+                            .thenComparator { a, b -> NaturalOrder.compare(a.name, b.name) }
                     )
 
                 cacheManager.saveFolderListing(server.id, path, items)
@@ -121,29 +185,47 @@ class SmbManager(
         }
     }
 
-    suspend fun openFileStream(server: SmbServer, path: String): Result<java.io.InputStream> =
-        withContext(Dispatchers.IO) {
+    /**
+     * Opens a remote file for random-access reading. This call blocks; run it off the main thread.
+     * The caller must close the returned handle.
+     */
+    fun openFileHandle(server: SmbServer, path: String): Result<SmbFileHandle> {
+        val resolved = resolveShareAndPath(server, path)
+            ?: return Result.failure(IOException("Invalid path: $path"))
+        val diskShare = connectShare(server, resolved.first)
+            ?: return Result.failure(IOException("Could not connect to ${server.host}/${resolved.first}"))
+        return try {
+            val file = diskShare.openFile(
+                resolved.second,
+                EnumSet.of(AccessMask.GENERIC_READ),
+                null,
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OPEN,
+                null
+            )
             try {
-                val resolved = resolveShareAndPath(server, path)
-                    ?: return@withContext Result.failure(Exception("No connection"))
-                val shareName = resolved.first
-                val cleanPath = resolved.second
-                val share = connectShare(server, shareName)
-                    ?: return@withContext Result.failure(Exception("No connection"))
-
-                val file = share.openFile(
-                    cleanPath,
-                    EnumSet.of(AccessMask.GENERIC_READ),
-                    null,
-                    SMB2ShareAccess.ALL,
-                    SMB2CreateDisposition.FILE_OPEN,
-                    null
-                )
-                Result.success(file.inputStream)
+                val size = file.fileInformation.standardInformation.endOfFile
+                Result.success(SmbFileHandle(diskShare, file, size))
             } catch (e: Exception) {
-                Log.e(TAG, "openFileStream failed", e)
-                Result.failure(e)
+                try {
+                    file.close()
+                } catch (_: Exception) {
+                }
+                throw e
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "openFileHandle failed for $path", e)
+            try {
+                diskShare.close()
+            } catch (_: Exception) {
+            }
+            Result.failure(e)
+        }
+    }
+
+    suspend fun openFileStream(server: SmbServer, path: String): Result<InputStream> =
+        withContext(Dispatchers.IO) {
+            openFileHandle(server, path).map { it.inputStream() }
         }
 
     suspend fun rename(server: SmbServer, oldPath: String, newName: String): Result<Unit> =
@@ -156,39 +238,46 @@ class SmbManager(
                 val share = connectShare(server, shareName)
                     ?: return@withContext Result.failure(Exception("No connection"))
 
-                val cleanOld = relPath.replace('/', '\\')
-                val parent = cleanOld.substringBeforeLast('\\', "")
-                val newPath = if (parent.isEmpty()) newName else "$parent\\$newName"
+                try {
+                    val cleanOld = relPath.replace('/', '\\')
+                    val parent = cleanOld.substringBeforeLast('\\', "")
+                    val newPath = if (parent.isEmpty()) newName else "$parent\\$newName"
 
-                val entry = try {
-                    share.openFile(
-                        cleanOld,
-                        EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE),
-                        null,
-                        SMB2ShareAccess.ALL,
-                        SMB2CreateDisposition.FILE_OPEN,
-                        null
-                    )
-                } catch (_: Exception) {
-                    share.openDirectory(
-                        cleanOld,
-                        EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE),
-                        null,
-                        SMB2ShareAccess.ALL,
-                        SMB2CreateDisposition.FILE_OPEN,
-                        null
-                    )
+                    val entry = try {
+                        share.openFile(
+                            cleanOld,
+                            EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE),
+                            null,
+                            SMB2ShareAccess.ALL,
+                            SMB2CreateDisposition.FILE_OPEN,
+                            null
+                        )
+                    } catch (_: Exception) {
+                        share.openDirectory(
+                            cleanOld,
+                            EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE),
+                            null,
+                            SMB2ShareAccess.ALL,
+                            SMB2CreateDisposition.FILE_OPEN,
+                            null
+                        )
+                    }
+                    try {
+                        entry.rename(newPath)
+                    } finally {
+                        try {
+                            entry.close()
+                        } catch (_: Exception) {
+                        }
+                    }
+                } finally {
+                    try {
+                        share.close()
+                    } catch (_: Exception) {
+                    }
                 }
-                entry.rename(newPath)
-                entry.close()
 
-                val parentPath = if (server.share.isBlank()) {
-                    val slash = oldPath.trim('/').indexOf('/')
-                    if (slash < 0) "" else oldPath.trim('/').substring(0, slash)
-                } else {
-                    oldPath.substringBeforeLast('/', "")
-                }
-                cacheManager.saveFolderListing(server.id, parentPath, emptyList())
+                cacheManager.invalidateFolder(server.id, oldPath.substringBeforeLast('/', ""))
                 Result.success(Unit)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -206,12 +295,18 @@ class SmbManager(
                     ?: return@withContext Result.failure(Exception("No connection"))
 
                 try {
-                    share.rm(clean)
-                } catch (_: Exception) {
-                    share.rmdir(clean, false)
+                    try {
+                        share.rm(clean)
+                    } catch (_: Exception) {
+                        share.rmdir(clean, false)
+                    }
+                } finally {
+                    try {
+                        share.close()
+                    } catch (_: Exception) {
+                    }
                 }
-                val parent = path.substringBeforeLast('/', "")
-                cacheManager.saveFolderListing(server.id, parent, emptyList())
+                cacheManager.invalidateFolder(server.id, path.substringBeforeLast('/', ""))
                 Result.success(Unit)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -250,32 +345,65 @@ class SmbManager(
         }.replace("//", "/")
     }
 
-    private fun getSession(server: SmbServer): Session? {
+    private fun fingerprint(server: SmbServer): String =
+        "${server.host}|${server.port}|${server.username}|${server.domain}|${server.password.hashCode()}"
+
+    private fun getSession(server: SmbServer): Session? = synchronized(sessionLock) {
         val key = server.id
-        return try {
+        try {
             val existing = sessions[key]
-            if (existing != null && existing.first.isConnected) {
-                existing.second
-            } else {
-                val conn = client.connect(server.host, server.port)
-                val auth = if (server.username.isBlank()) {
-                    AuthenticationContext.anonymous()
-                } else {
-                    AuthenticationContext(
-                        server.username,
-                        server.password.toCharArray(),
-                        server.domain
-                    )
-                }
-                val sess = conn.authenticate(auth)
-                sessions[key] = Pair(conn, sess)
-                sess
+            if (existing != null &&
+                existing.connection.isConnected &&
+                existing.fingerprint == fingerprint(server)
+            ) {
+                return@synchronized existing.session
             }
+            // Stale connection or the server settings were edited: drop the old session first.
+            if (existing != null) {
+                sessions.remove(key)
+                try {
+                    existing.connection.close()
+                } catch (_: Exception) {
+                }
+            }
+            val conn = client.connect(server.host, server.port)
+            val auth = if (server.username.isBlank()) {
+                AuthenticationContext.anonymous()
+            } else {
+                AuthenticationContext(
+                    server.username,
+                    server.password.toCharArray(),
+                    server.domain
+                )
+            }
+            val sess = conn.authenticate(auth)
+            sessions[key] = SessionEntry(conn, sess, fingerprint(server))
+            sess
         } catch (e: Exception) {
             Log.e(TAG, "Failed to authenticate to ${server.host}", e)
             sessions.remove(key)
             null
         }
+    }
+
+    /** Closes the cached connection of one server (e.g. after it is deleted). */
+    fun evict(serverId: String) {
+        synchronized(sessionLock) {
+            sessions.remove(serverId)?.let {
+                try {
+                    it.connection.close()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /** Hides Windows system folders and dot-files. */
+    private fun isHiddenName(name: String): Boolean {
+        if (name == "." || name == ".." || name.startsWith(".") || name.startsWith("$")) return true
+        return name.equals("System Volume Information", ignoreCase = true) ||
+            name.equals("Thumbs.db", ignoreCase = true) ||
+            name.equals("desktop.ini", ignoreCase = true)
     }
 
     private fun connectShare(server: SmbServer, shareName: String? = null): DiskShare? {
@@ -347,7 +475,7 @@ class SmbManager(
             .sortedBy { it.lowercase() }
             .map { shareName ->
                 MediaItem(
-                    id = UUID.randomUUID().toString(),
+                    id = Ids.mediaId(server.id, shareName),
                     name = shareName,
                     path = shareName,
                     isDirectory = true,
@@ -375,9 +503,9 @@ class SmbManager(
     }
 
     fun closeAll() {
-        sessions.values.forEach { (conn, _) ->
+        sessions.values.forEach { entry ->
             try {
-                conn.close()
+                entry.connection.close()
             } catch (_: Exception) {
             }
         }

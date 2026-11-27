@@ -6,6 +6,8 @@ import com.hamina.home.data.model.MediaItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 import java.security.MessageDigest
 
 /**
@@ -54,22 +56,21 @@ class CacheManager(private val context: Context) {
             try {
                 val key = makeKey(serverId, path)
                 val file = File(folderCacheDir, "$key.json")
-                // Simple serialization for now (can be upgraded to protobuf / kotlinx.serialization later)
-                val content = items.joinToString("\n") { item ->
-                    listOf(
-                        item.id,
-                        item.name,
-                        item.path,
-                        if (item.isDirectory) "1" else "0",
-                        item.size.toString(),
-                        item.lastModified.toString(),
-                        item.mimeType ?: "",
-                        item.serverId ?: "",
-                        item.thumbnailPath ?: "",
-                        item.lastPlayedPosition.toString(),
-                        item.lastPlayedAt.toString()
-                    ).joinToString("|")
+                val arr = JSONArray()
+                items.forEach { item ->
+                    arr.put(JSONObject().apply {
+                        put("id", item.id)
+                        put("name", item.name)
+                        put("path", item.path)
+                        put("dir", item.isDirectory)
+                        put("size", item.size)
+                        put("mod", item.lastModified)
+                        put("mime", item.mimeType ?: "")
+                        put("server", item.serverId ?: "")
+                        put("thumb", item.thumbnailPath ?: "")
+                    })
                 }
+                val content = arr.toString()
                 file.writeText(content)
                 // Write timestamp
                 File(metaDir, "$key.ts").writeText(System.currentTimeMillis().toString())
@@ -99,22 +100,20 @@ class CacheManager(private val context: Context) {
                 val file = File(folderCacheDir, "$key.json")
                 if (!file.exists()) return@withContext null
 
-                val lines = file.readLines()
-                val items = lines.mapNotNull { line ->
-                    val parts = line.split("|")
-                    if (parts.size < 11) return@mapNotNull null
+                // Files written by older versions used a different format; parsing fails and we treat that as a cache miss.
+                val arr = JSONArray(file.readText())
+                val items = (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
                     MediaItem(
-                        id = parts[0],
-                        name = parts[1],
-                        path = parts[2],
-                        isDirectory = parts[3] == "1",
-                        size = parts[4].toLongOrNull() ?: 0L,
-                        lastModified = parts[5].toLongOrNull() ?: 0L,
-                        mimeType = parts[6].ifEmpty { null },
-                        serverId = parts[7].ifEmpty { null },
-                        thumbnailPath = parts[8].ifEmpty { null },
-                        lastPlayedPosition = parts[9].toLongOrNull() ?: 0L,
-                        lastPlayedAt = parts[10].toLongOrNull() ?: 0L
+                        id = o.getString("id"),
+                        name = o.getString("name"),
+                        path = o.getString("path"),
+                        isDirectory = o.optBoolean("dir", false),
+                        size = o.optLong("size", 0L),
+                        lastModified = o.optLong("mod", 0L),
+                        mimeType = o.optString("mime", "").ifEmpty { null },
+                        serverId = o.optString("server", "").ifEmpty { null },
+                        thumbnailPath = o.optString("thumb", "").ifEmpty { null }
                     )
                 }
                 Log.d(TAG, "Loaded cached folder $path → ${items.size} items")
@@ -123,6 +122,15 @@ class CacheManager(private val context: Context) {
                 Log.e(TAG, "Failed to load folder cache", e)
                 null
             }
+        }
+    }
+
+    /** Drops the cached listing of one folder (used after rename / delete). */
+    suspend fun invalidateFolder(serverId: String, path: String) {
+        withContext(Dispatchers.IO) {
+            val key = makeKey(serverId, path)
+            File(folderCacheDir, "$key.json").delete()
+            File(metaDir, "$key.ts").delete()
         }
     }
 

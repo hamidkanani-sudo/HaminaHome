@@ -12,8 +12,8 @@ android {
         applicationId = "com.hamina.home"
         minSdk = 26          // Android 8.0+ suitable for most Android TV boxes
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -56,8 +56,6 @@ dependencies {
     // Core Android + TV
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.leanback:leanback:1.0.0")
-    implementation("androidx.tvprovider:tvprovider:1.0.0")
 
     // Jetpack Compose (for modern TV UI where possible)
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
@@ -66,44 +64,32 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.tv:tv-foundation:1.0.0")
-    implementation("androidx.tv:tv-material:1.0.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // Lifecycle & Navigation
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.navigation:navigation-compose:2.8.5")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
 
     // Media3 / ExoPlayer - built-in player (no external apps)
     val media3Version = "1.5.1"
     implementation("androidx.media3:media3-exoplayer:$media3Version")
-    implementation("androidx.media3:media3-exoplayer-dash:$media3Version")
     implementation("androidx.media3:media3-ui:$media3Version")
-    implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-common:$media3Version")
 
     // SMB client - smbj is pure Java and reliable for SMB2/3
     implementation("com.hierynomus:smbj:0.13.0")
-    // Alternative / complement for some cases
-    implementation("eu.agno3.jcifs:jcifs-ng:2.1.10")
 
     // Coroutines & Async
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 
     // Local storage & caching
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    // Note: ksp for Room will be added when we set up annotation processing properly
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
     // Image loading for thumbnails (Coil is lightweight and modern)
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("io.coil-kt:coil:2.7.0")
-
-    // JSON for simple config
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

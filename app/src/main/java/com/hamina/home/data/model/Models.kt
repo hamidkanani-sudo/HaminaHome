@@ -14,7 +14,8 @@ data class SmbServer(
     val password: String = "",
     val domain: String = "",
     val port: Int = 445,
-    val isFavorite: Boolean = false
+    val isFavorite: Boolean = false,
+    val isLocal: Boolean = false      // local storage volume (internal / USB), not an SMB server
 ) : Serializable
 
 /**

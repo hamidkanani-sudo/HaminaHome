@@ -25,7 +25,7 @@ class SmbDataSource(
     private val server: SmbServer
 ) : BaseDataSource(/* isNetwork = */ true) {
 
-    private var handle: SmbFileHandle? = null
+    private var handle: FileHandle? = null
     private var uri: Uri? = null
     private var opened = false
 

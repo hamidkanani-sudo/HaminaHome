@@ -27,6 +27,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import android.graphics.Bitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
@@ -39,11 +40,14 @@ import com.hamina.home.data.model.MediaItem
 import com.hamina.home.data.model.SmbServer
 import com.hamina.home.data.thumb.ImageDecoding
 import com.hamina.home.ui.formatSize
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.text.DateFormat
@@ -99,9 +103,14 @@ class PhotoViewerActivity : ComponentActivity() {
     private var viewWidth = 0
     private var viewHeight = 0
 
-    private val decodedCache = LruCache<Int, Decoded>(3)
+    private val decodedCache = LruCache<Int, Decoded>(6)
     private var loadJob: Job? = null
-    private var prefetchJob: Job? = null
+    private val prefetchJobs = HashMap<Int, Job>()
+    private val prefetchGate = Semaphore(1)
+    private var direction = 1
+
+    // The list thumbnail, shown at once while the full-size photo is still being read.
+    private var placeholder by mutableStateOf<Bitmap?>(null)
     private var slideshowJob: Job? = null
     private var infoJob: Job? = null
 
@@ -140,7 +149,7 @@ class PhotoViewerActivity : ComponentActivity() {
         }
 
         lifecycleScope.launch {
-            server = app.serverRepository.getServersOnce().firstOrNull { it.id == serverId }
+            server = app.resolveServer(serverId)
             if (server == null) {
                 loading = false
                 error = "SMB server was not found"
@@ -165,61 +174,105 @@ class PhotoViewerActivity : ComponentActivity() {
     private fun show(requested: Int) {
         if (images.isEmpty()) return
         val target = wrap(requested)
+        direction = if (requested < index) -1 else 1
         index = target
         resetView()
         flashInfo()
         loadJob?.cancel()
-        prefetchJob?.cancel()
         restartSlideshow()
 
         val cached = decodedCache.get(target)
         if (cached != null) {
             current = cached
+            placeholder = null
             loading = false
             error = null
-            prefetchNeighbors(target)
+            schedulePrefetch(target)
             return
         }
 
         current = null
         loading = true
         error = null
+
+        // Instant preview from the thumbnail cache while the real photo loads.
+        val item = images[target]
+        placeholder = app.thumbnailManager.peekMemory(item)
+        if (placeholder == null) {
+            lifecycleScope.launch {
+                val thumb = app.thumbnailManager.peek(item)
+                if (index == target && current == null) placeholder = thumb
+            }
+        }
+
         loadJob = lifecycleScope.launch {
             try {
-                val decoded = decodeIndex(target)
-                decodedCache.put(target, decoded)
+                // If this photo is already being prefetched, wait for that instead of reading it twice.
+                prefetchJobs[target]?.let { if (it.isActive) it.join() }
+                var decoded = decodedCache.get(target)
+                if (decoded == null) {
+                    decoded = decodeIndex(target)
+                    decodedCache.put(target, decoded)
+                }
                 if (index == target) {
                     current = decoded
+                    placeholder = null
                     loading = false
-                    prefetchNeighbors(target)
                 }
+                schedulePrefetch(target)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 if (index == target) {
                     loading = false
+                    placeholder = null
                     error = e.message ?: "Could not open this image"
                 }
             }
         }
     }
 
-    private fun prefetchNeighbors(center: Int) {
+    /**
+     * Keeps the next photos in the direction of travel (and the previous one) decoded, so paging
+     * is instant. Work that is no longer needed is cancelled.
+     */
+    private fun schedulePrefetch(center: Int) {
         if (images.size < 2) return
-        prefetchJob?.cancel()
-        prefetchJob = lifecycleScope.launch {
-            for (candidate in listOf(wrap(center + 1), wrap(center - 1))) {
-                if (!isActive) return@launch
-                if (decodedCache.get(candidate) != null) continue
-                try {
-                    decodedCache.put(candidate, decodeIndex(candidate))
-                } catch (_: Exception) {
-                    // Not fatal: it will be loaded (and the error shown) when the user gets there.
+        val wanted = LinkedHashSet<Int>()
+        wanted.add(wrap(center + direction))
+        wanted.add(wrap(center + 2 * direction))
+        wanted.add(wrap(center - direction))
+        wanted.remove(center)
+
+        val iterator = prefetchJobs.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (!wanted.contains(entry.key)) {
+                entry.value.cancel()
+                iterator.remove()
+            }
+        }
+        for (candidate in wanted) {
+            if (decodedCache.get(candidate) != null) continue
+            if (prefetchJobs[candidate]?.isActive == true) continue
+            prefetchJobs[candidate] = lifecycleScope.launch {
+                prefetchGate.withPermit {
+                    if (decodedCache.get(candidate) == null) {
+                        try {
+                            decodedCache.put(candidate, decodeIndex(candidate))
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            // Not fatal: it is loaded (and the error shown) when the user gets there.
+                        }
+                    }
                 }
             }
         }
     }
 
     private suspend fun decodeIndex(i: Int): Decoded {
-        val srv = server ?: throw IllegalStateException("SMB server was not found")
+        val srv = server ?: throw IllegalStateException("Source was not found")
         val item = images[i]
         return withContext(Dispatchers.IO) {
             val handle = app.smbManager.openFileHandle(srv, item.path).getOrThrow()
@@ -426,7 +479,19 @@ class PhotoViewerActivity : ComponentActivity() {
             contentAlignment = Alignment.Center
         ) {
             when {
-                loading -> CircularProgressIndicator(color = Color(0xFF4C9AFF))
+                loading -> {
+                    val preview = placeholder
+                    if (preview != null) {
+                        val previewImage = androidx.compose.runtime.remember(preview) { preview.asImageBitmap() }
+                        Image(
+                            bitmap = previewImage,
+                            contentDescription = null,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                    CircularProgressIndicator(color = Color(0xFF4C9AFF))
+                }
                 decoded != null -> {
                     val image = androidx.compose.runtime.remember(decoded) { decoded.bitmap.asImageBitmap() }
                     Image(
@@ -524,6 +589,7 @@ class PhotoViewerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        prefetchJobs.values.forEach { it.cancel() }
         decodedCache.evictAll()
     }
 
@@ -533,7 +599,7 @@ class PhotoViewerActivity : ComponentActivity() {
         const val EXTRA_NAME = "photo_name"
         const val EXTRA_INDEX = "photo_index"
 
-        private const val MAX_SIDE = 3072
+        private const val MAX_SIDE = 2560
         private const val MAX_FILE_BYTES = 96L * 1024 * 1024
         private const val SLIDESHOW_MS = 5_000L
     }

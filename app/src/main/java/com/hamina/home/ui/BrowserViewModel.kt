@@ -8,20 +8,38 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hamina.home.HaminaApp
+import com.hamina.home.data.local.LocalStorage
 import com.hamina.home.data.model.MediaItem
 import com.hamina.home.data.model.SmbServer
 import com.hamina.home.data.model.SortMode
 import com.hamina.home.data.model.ViewMode
 import com.hamina.home.data.playback.PlaybackRepository
+import com.hamina.home.data.storage.TransferManager
 import com.hamina.home.util.NaturalOrder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** Dialogs that can be shown over the browser. */
+sealed class BrowserDialog {
+    object Actions : BrowserDialog()
+    class Rename(val item: MediaItem) : BrowserDialog()
+    object NewFolder : BrowserDialog()
+    class ConfirmDelete(val items: List<MediaItem>) : BrowserDialog()
+    class Message(val text: String) : BrowserDialog()
+}
 
 /**
  * Holds all browsing state outside the Activity, so it survives configuration changes and so the
- * navigation rules (Back, Retry, focus restore) live in one place.
+ * navigation rules (Back, Retry, focus restore) and file actions live in one place.
  */
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
+
+    companion object {
+        const val SECTION_SERVERS = 1
+        const val SECTION_STORAGE = 2
+    }
 
     private class Frame(val path: String, val focusIndex: Int)
 
@@ -30,6 +48,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     // ---------- state shown by the UI ----------
 
     var servers by mutableStateOf<List<SmbServer>>(emptyList())
+        private set
+    var volumes by mutableStateOf<List<LocalStorage.Volume>>(emptyList())
         private set
     var recent by mutableStateOf<List<PlaybackRepository.RecentPlay>>(emptyList())
         private set
@@ -40,7 +60,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     var errorMessage by mutableStateOf<String?>(null)
         private set
 
-    /** The server we are inside of (null = home screen is shown). */
+    /** The source (SMB server or storage volume) we are inside of; null = home screen. */
     var currentServer by mutableStateOf<SmbServer?>(null)
         private set
     var currentPath by mutableStateOf("")
@@ -61,7 +81,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     var focusPending by mutableStateOf(false)
         private set
 
-    /** On the home screen, the first start focuses "Continue watching"; coming back focuses the server. */
+    /** Home screen: the row that should get focus when coming back (servers or storage). */
+    var homeSection by mutableIntStateOf(SECTION_SERVERS)
+        private set
+
+    /** On the home screen, the first start focuses "Continue watching"; coming back focuses the source. */
     var focusRecentFirst by mutableStateOf(true)
         private set
 
@@ -74,12 +98,26 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     var formServer by mutableStateOf<SmbServer?>(null)
         private set
 
+    // ---------- file actions ----------
+
+    var clipboard by mutableStateOf<List<TransferManager.ClipItem>>(emptyList())
+        private set
+    var clipboardMove by mutableStateOf(false)
+        private set
+    var marked by mutableStateOf<Set<String>>(emptySet())
+        private set
+    var dialog by mutableStateOf<BrowserDialog?>(null)
+        private set
+
+    /** Progress of the running copy / move / delete (shown at the top of the screen). */
+    val transfer: TransferManager.TransferState? get() = app.transferManager.state
+
     val selectedItem: MediaItem?
         get() = if (currentServer != null) items.getOrNull(focusIndex) else null
 
     private val stack = ArrayDeque<Frame>()
     private var hasListing = false
-    private var lastServerIndex = 0
+    private var lastHomeIndex = 0
     private var loadJob: Job? = null
     private var retryAction: (() -> Unit)? = null
     private var serversLoaded = false
@@ -109,6 +147,22 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch {
             app.settingsRepository.viewMode.collect { viewMode = it }
         }
+        refreshVolumes()
+
+        // When a copy/move/delete ends, reload the folder if it was affected.
+        app.transferManager.onChanged = { affected ->
+            val server = currentServer
+            if (server != null && hasListing && !isLoading &&
+                affected.any { it.first == server.id && it.second == currentPath }
+            ) {
+                refresh()
+            }
+        }
+    }
+
+    override fun onCleared() {
+        app.transferManager.onChanged = null
+        super.onCleared()
     }
 
     private fun updateReady() {
@@ -122,12 +176,20 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         focusPending = false
     }
 
+    fun refreshVolumes() {
+        viewModelScope.launch {
+            volumes = withContext(Dispatchers.IO) { LocalStorage.volumes(app) }
+        }
+    }
+
     // ---------- navigation ----------
 
-    fun openServer(server: SmbServer, index: Int) {
-        lastServerIndex = index
+    fun openServer(server: SmbServer, index: Int, section: Int = SECTION_SERVERS) {
+        lastHomeIndex = index
+        homeSection = section
         stack.clear()
         items = emptyList()
+        marked = emptySet()
         hasListing = false
         currentServer = server
         currentPath = ""
@@ -173,7 +235,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         retryAction?.invoke()
     }
 
-    /** Reloads the current folder from the server (bypasses the cache). */
+    /** Reloads the current folder from the source (bypasses the cache). */
     fun refresh() {
         val server = currentServer ?: return
         if (!hasListing) return
@@ -185,15 +247,17 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         currentServer = null
         currentPath = ""
         items = emptyList()
+        marked = emptySet()
         hasListing = false
         isLoading = false
         errorMessage = null
         retryAction = null
         stack.clear()
-        focusIndex = lastServerIndex
+        focusIndex = lastHomeIndex
         focusRecentFirst = false
         focusPending = true
         loadRecent()
+        refreshVolumes()
     }
 
     private fun load(
@@ -210,7 +274,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         // Retry repeats exactly this request (and bypasses the cache).
         retryAction = { load(server, path, true, restoreIndex, push, pop) }
 
-        loadJob = viewModelScope.launch {
+        // The list comes first: thumbnail work waits until this listing is on screen.
+        app.thumbnailManager.acquireBusy()
+        val job = viewModelScope.launch {
             val result = app.smbManager.listDirectory(server, path, force)
             isLoading = false
             if (result.isSuccess) {
@@ -221,12 +287,15 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 if (push != null) stack.addLast(push)
                 if (pop) stack.removeLastOrNull()
                 items = ordered
+                marked = emptySet()
                 focusIndex = restoreIndex.coerceIn(0, (ordered.size - 1).coerceAtLeast(0))
                 focusPending = ordered.isNotEmpty()
             } else {
                 errorMessage = result.exceptionOrNull()?.message ?: "Network error. Check connection."
             }
         }
+        job.invokeOnCompletion { app.thumbnailManager.releaseBusy() }
+        loadJob = job
     }
 
     // ---------- playback info ----------
@@ -238,6 +307,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     /** Called when returning from the player so resume info and "Continue watching" are current. */
     fun refreshPlayback() {
         loadRecent()
+        refreshVolumes()
         val snapshot = items
         if (snapshot.isEmpty()) return
         viewModelScope.launch {
@@ -292,6 +362,129 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             SortMode.SIZE_ASC -> list.sortedWith(dirsFirst.thenBy { it.size })
             SortMode.SIZE_DESC -> list.sortedWith(dirsFirst.thenByDescending { it.size })
             SortMode.LAST_PLAYED -> list.sortedWith(dirsFirst.thenByDescending { it.lastPlayedAt })
+        }
+    }
+
+    // ---------- file actions (copy, cut, paste, rename, delete, new folder) ----------
+
+    /** The marked items, or the focused item when nothing is marked. */
+    fun targetItems(): List<MediaItem> =
+        if (marked.isNotEmpty()) items.filter { marked.contains(it.id) } else listOfNotNull(selectedItem)
+
+    fun openActions() {
+        if (currentServer != null && hasListing && !isLoading) dialog = BrowserDialog.Actions
+    }
+
+    fun dismissDialog() {
+        dialog = null
+        focusPending = true
+    }
+
+    fun showMessage(text: String) {
+        dialog = BrowserDialog.Message(text)
+    }
+
+    fun toggleMark() {
+        val item = selectedItem ?: return
+        marked = if (marked.contains(item.id)) marked - item.id else marked + item.id
+        dismissDialog()
+    }
+
+    fun clearMarks() {
+        marked = emptySet()
+        dismissDialog()
+    }
+
+    fun copyToClipboard(move: Boolean) {
+        val server = currentServer ?: return
+        val targets = targetItems()
+        if (targets.isEmpty()) return
+        clipboard = targets.map { TransferManager.ClipItem(server, it) }
+        clipboardMove = move
+        marked = emptySet()
+        dismissDialog()
+    }
+
+    fun clearClipboard() {
+        clipboard = emptyList()
+        dismissDialog()
+    }
+
+    fun canPasteHere(): Boolean {
+        val server = currentServer ?: return false
+        if (clipboard.isEmpty() || !hasListing) return false
+        // The list of shares of an SMB server is not a place where files can be put.
+        return server.isLocal || server.share.isNotBlank() || currentPath.isNotEmpty()
+    }
+
+    fun paste() {
+        val server = currentServer ?: return
+        if (!canPasteHere()) {
+            showMessage("Open a folder first. Files cannot be pasted into the list of shares.")
+            return
+        }
+        app.transferManager.copy(clipboard, server, currentPath, clipboardMove)
+        if (clipboardMove) clipboard = emptyList()
+        dismissDialog()
+    }
+
+    fun askDelete() {
+        val targets = targetItems()
+        if (targets.isEmpty()) return
+        dialog = BrowserDialog.ConfirmDelete(targets)
+    }
+
+    fun confirmDelete(targets: List<MediaItem>) {
+        val server = currentServer ?: return
+        app.transferManager.delete(targets.map { TransferManager.ClipItem(server, it) })
+        marked = emptySet()
+        dismissDialog()
+    }
+
+    fun askRename() {
+        val item = targetItems().singleOrNull() ?: return
+        dialog = BrowserDialog.Rename(item)
+    }
+
+    fun askNewFolder() {
+        dialog = BrowserDialog.NewFolder
+    }
+
+    fun rename(item: MediaItem, newName: String) {
+        val server = currentServer ?: return
+        dismissDialog()
+        viewModelScope.launch {
+            val error = withContext(Dispatchers.IO) {
+                try {
+                    app.storageOps.rename(server, item.path, newName)
+                    app.cacheManager.invalidateFolder(server.id, currentPath)
+                    null
+                } catch (e: Exception) {
+                    e.message ?: "Could not rename"
+                }
+            }
+            if (error != null) showMessage(error) else refresh()
+        }
+    }
+
+    fun createFolder(name: String) {
+        val server = currentServer ?: return
+        dismissDialog()
+        viewModelScope.launch {
+            val error = withContext(Dispatchers.IO) {
+                try {
+                    val clean = name.trim()
+                    if (clean.isEmpty() || clean.contains('/') || clean.contains('\\')) {
+                        throw IllegalArgumentException("This name is not valid")
+                    }
+                    app.storageOps.mkdir(server, app.storageOps.join(currentPath, clean))
+                    app.cacheManager.invalidateFolder(server.id, currentPath)
+                    null
+                } catch (e: Exception) {
+                    e.message ?: "Could not create the folder"
+                }
+            }
+            if (error != null) showMessage(error) else refresh()
         }
     }
 

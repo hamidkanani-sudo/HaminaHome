@@ -1,7 +1,7 @@
 package com.hamina.home.data.thumb
 
 import android.media.MediaDataSource
-import com.hamina.home.data.smb.SmbFileHandle
+import com.hamina.home.data.smb.FileHandle
 import java.io.IOException
 
 /**
@@ -9,7 +9,7 @@ import java.io.IOException
  * a small cache of 256 KB chunks, because the retriever jumps between the file header, the
  * index and the data with many tiny reads, and every SMB round-trip is slow.
  */
-class SmbMediaDataSource(private val handle: SmbFileHandle) : MediaDataSource() {
+class SmbMediaDataSource(private val handle: FileHandle) : MediaDataSource() {
 
     private val chunks = object : LinkedHashMap<Long, ByteArray>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, ByteArray>?): Boolean {

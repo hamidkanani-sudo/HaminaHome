@@ -9,7 +9,11 @@ import com.hamina.home.data.cache.CacheManager
 import com.hamina.home.data.playback.PlaybackRepository
 import com.hamina.home.data.settings.ServerRepository
 import com.hamina.home.data.settings.SettingsRepository
+import com.hamina.home.data.local.LocalStorage
+import com.hamina.home.data.model.SmbServer
 import com.hamina.home.data.smb.SmbManager
+import com.hamina.home.data.storage.StorageOps
+import com.hamina.home.data.storage.TransferManager
 import com.hamina.home.data.thumb.ThumbnailManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +35,12 @@ class HaminaApp : Application() {
     lateinit var thumbnailManager: ThumbnailManager
         private set
 
+    lateinit var storageOps: StorageOps
+        private set
+
+    lateinit var transferManager: TransferManager
+        private set
+
     lateinit var settingsRepository: SettingsRepository
         private set
 
@@ -50,6 +60,8 @@ class HaminaApp : Application() {
         playbackRepository = PlaybackRepository(dataStore)
         smbManager = SmbManager(this, cacheManager)
         thumbnailManager = ThumbnailManager(this, smbManager)
+        storageOps = StorageOps(smbManager)
+        transferManager = TransferManager(storageOps, cacheManager)
 
         // Encrypt any plain-text SMB passwords saved by older versions.
         applicationScope.launch { serverRepository.migratePasswordsIfNeeded() }
@@ -62,4 +74,12 @@ class HaminaApp : Application() {
         lateinit var instance: HaminaApp
             private set
     }
+
+    /** Finds a saved SMB server or a local storage volume by its id. */
+    suspend fun resolveServer(id: String): SmbServer? =
+        if (id.startsWith(LocalStorage.ID_PREFIX)) {
+            LocalStorage.serverFromId(id)
+        } else {
+            serverRepository.getServersOnce().firstOrNull { it.id == id }
+        }
 }

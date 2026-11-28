@@ -1,6 +1,7 @@
 package com.hamina.home.player
 
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.KeyEvent
@@ -32,6 +33,7 @@ import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import com.hamina.home.HaminaApp
 import com.hamina.home.R
+import com.hamina.home.data.local.LocalStorage
 import com.hamina.home.data.model.AspectRatio
 import com.hamina.home.data.model.PlayerSettings
 import com.hamina.home.data.model.SmbServer
@@ -104,7 +106,7 @@ class PlayerActivity : ComponentActivity() {
                         onSelectText = { selectText(it) },
                         onSelectAudio = { selectAudio(it) },
                         onSettings = { updateSettings(it) },
-                        onSpeed = { setSpeed(it) }
+                        onSpeed = { applySpeed(it) }
                     )
                 }
             }
@@ -116,8 +118,7 @@ class PlayerActivity : ComponentActivity() {
         val serverId = intent.getStringExtra(EXTRA_SERVER_ID) ?: ""
 
         lifecycleScope.launch {
-            val servers = app.serverRepository.getServersOnce()
-            currentServer = servers.find { it.id == serverId }
+            currentServer = app.resolveServer(serverId)
             if (currentServer == null) {
                 Toast.makeText(this@PlayerActivity, "Server not found", Toast.LENGTH_SHORT).show()
                 finish()
@@ -182,7 +183,7 @@ class PlayerActivity : ComponentActivity() {
             if (player !== exo) return@launch
 
             val mediaItem = MediaItem.Builder()
-                .setUri(SmbDataSource.buildUri(server, currentPath))
+                .setUri(mediaUri(server))
                 .setMediaId(mediaId)
                 .setSubtitleConfigurations(sidecars)
                 .build()
@@ -218,6 +219,14 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /** Local files are played directly; SMB files stream through [SmbDataSource]. */
+    private fun mediaUri(server: SmbServer): Uri =
+        if (server.isLocal) {
+            Uri.fromFile(LocalStorage.fileOf(server, currentPath))
+        } else {
+            SmbDataSource.buildUri(server, currentPath)
+        }
+
     // ---------- settings panel ----------
 
     private fun openMenu() {
@@ -239,7 +248,7 @@ class PlayerActivity : ComponentActivity() {
         app.applicationScope.launch { app.settingsRepository.updatePlayerSettings(new) }
     }
 
-    private fun setSpeed(value: Float) {
+    private fun applySpeed(value: Float) {
         speed = value
         player?.setPlaybackSpeed(value)
     }

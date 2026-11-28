@@ -8,15 +8,18 @@ import android.util.Log
 import android.util.LruCache
 import com.hamina.home.data.model.MediaItem
 import com.hamina.home.data.model.SmbServer
-import com.hamina.home.data.smb.SmbFileHandle
+import com.hamina.home.data.smb.FileHandle
 import com.hamina.home.data.smb.SmbManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -43,6 +46,22 @@ class ThumbnailManager(
 
     // Files that cannot produce a thumbnail (unsupported format, too large, ...).
     private val noThumbnail = ConcurrentHashMap.newKeySet<String>()
+
+    // Folder listings have priority: while one is loading, no new thumbnail work is started.
+    private val idle = MutableStateFlow(true)
+    private val busyCount = AtomicInteger(0)
+
+    fun acquireBusy() {
+        busyCount.incrementAndGet()
+        idle.value = false
+    }
+
+    fun releaseBusy() {
+        if (busyCount.decrementAndGet() <= 0) {
+            busyCount.set(0)
+            idle.value = true
+        }
+    }
 
     fun supports(item: MediaItem): Boolean = !item.isDirectory && (item.isImage || item.isVideo)
 
@@ -73,6 +92,7 @@ class ThumbnailManager(
         val cached = peek(item)
         if (cached != null) return cached
         if (!supports(item) || noThumbnail.contains(key(item))) return null
+        idle.first { it } // wait until no folder is being listed
         val gate = if (item.isVideo) videoGate else imageGate
         return gate.withPermit {
             // It may have been created while this request was waiting.
@@ -125,12 +145,12 @@ class ThumbnailManager(
         return bitmap
     }
 
-    private fun imageThumbnail(handle: SmbFileHandle): Bitmap? {
+    private fun imageThumbnail(handle: FileHandle): Bitmap? {
         val bytes = handle.readFully(MAX_IMAGE_BYTES) ?: return null
         return ImageDecoding.decode(bytes, THUMB_SIZE)
     }
 
-    private fun videoFrame(handle: SmbFileHandle): Bitmap? {
+    private fun videoFrame(handle: FileHandle): Bitmap? {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(SmbMediaDataSource(handle))

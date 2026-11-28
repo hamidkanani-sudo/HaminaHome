@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.hamina.home.data.cache.CacheManager
 import com.hamina.home.data.model.MediaItem
+import com.hamina.home.data.local.LocalStorage
 import com.hamina.home.data.model.SmbServer
 import com.hamina.home.util.Ids
 import com.hamina.home.util.NaturalOrder
@@ -25,61 +26,23 @@ import kotlinx.coroutines.withContext
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.util.EnumSet
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-/**
- * An open remote file. Supports reading at an arbitrary offset (needed for seeking in video)
- * and releases both the file handle and its share connection on [close].
- */
-class SmbFileHandle internal constructor(
+/** A file opened on an SMB share. Closing it releases the file and its share connection. */
+class SmbRemoteHandle internal constructor(
     private val share: DiskShare,
     private val file: SmbFile,
-    val size: Long
-) : Closeable {
+    override val size: Long
+) : FileHandle() {
 
-    fun read(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
+    override fun read(position: Long, buffer: ByteArray, offset: Int, length: Int): Int {
         return try {
             file.read(buffer, position, offset, length)
         } catch (e: Exception) {
             throw IOException("SMB read failed: ${e.message}", e)
-        }
-    }
-
-    /** Reads the whole file into memory. Returns null if it is larger than [maxBytes]. */
-    fun readFully(maxBytes: Long): ByteArray? {
-        if (size > maxBytes || size > Int.MAX_VALUE) return null
-        val out = ByteArray(size.toInt())
-        var pos = 0
-        while (pos < out.size) {
-            val n = read(pos.toLong(), out, pos, minOf(out.size - pos, 512 * 1024))
-            if (n <= 0) break
-            pos += n
-        }
-        return if (pos == out.size) out else null
-    }
-
-    /** Sequential stream view; closing the stream closes the file and share. */
-    fun inputStream(): InputStream = object : InputStream() {
-        private var pos = 0L
-
-        override fun read(): Int {
-            val one = ByteArray(1)
-            val n = read(one, 0, 1)
-            return if (n <= 0) -1 else one[0].toInt() and 0xFF
-        }
-
-        override fun read(b: ByteArray, off: Int, len: Int): Int {
-            if (len == 0) return 0
-            val n = this@SmbFileHandle.read(pos, b, off, minOf(len, 512 * 1024))
-            if (n <= 0) return -1
-            pos += n
-            return n
-        }
-
-        override fun close() {
-            this@SmbFileHandle.close()
         }
     }
 
@@ -91,6 +54,31 @@ class SmbFileHandle internal constructor(
         try {
             share.close()
         } catch (_: Exception) {
+        }
+    }
+}
+
+/** Output stream for a file being written to an SMB share; closing it releases everything. */
+private class SmbOutput(
+    private val share: DiskShare,
+    private val file: SmbFile,
+    private val out: OutputStream
+) : OutputStream() {
+    override fun write(b: Int) = out.write(b)
+    override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
+    override fun flush() = out.flush()
+    override fun close() {
+        try {
+            out.close()
+        } finally {
+            try {
+                file.close()
+            } catch (_: Exception) {
+            }
+            try {
+                share.close()
+            } catch (_: Exception) {
+            }
         }
     }
 }
@@ -127,6 +115,14 @@ class SmbManager(
         path: String = "",
         forceRefresh: Boolean = false
     ): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
+            if (server.isLocal) {
+                return@withContext try {
+                    Result.success(LocalStorage.list(server, path))
+                } catch (e: Exception) {
+                    Result.failure(e)
+                }
+            }
+
         try {
             if (!forceRefresh) {
                 val cached = cacheManager.loadFolderListing(server.id, path)
@@ -204,7 +200,8 @@ class SmbManager(
      * Opens a remote file for random-access reading. This call blocks; run it off the main thread.
      * The caller must close the returned handle.
      */
-    fun openFileHandle(server: SmbServer, path: String): Result<SmbFileHandle> {
+    fun openFileHandle(server: SmbServer, path: String): Result<FileHandle> {
+        if (server.isLocal) return LocalStorage.open(server, path)
         val resolved = resolveShareAndPath(server, path)
             ?: return Result.failure(IOException("Invalid path: $path"))
         val diskShare = connectShare(server, resolved.first)
@@ -220,7 +217,7 @@ class SmbManager(
             )
             try {
                 val size = file.fileInformation.standardInformation.endOfFile
-                Result.success(SmbFileHandle(diskShare, file, size))
+                Result.success(SmbRemoteHandle(diskShare, file, size))
             } catch (e: Exception) {
                 try {
                     file.close()
@@ -507,6 +504,109 @@ class SmbManager(
             lower.endsWith(".mp3") -> "audio/mpeg"
             lower.endsWith(".flac") -> "audio/flac"
             else -> "application/octet-stream"
+        }
+    }
+
+    // ---------- write operations (blocking; call from a background thread) ----------
+
+    /** Opens a remote file for writing, replacing an existing one. */
+    fun openWriteStream(server: SmbServer, path: String): OutputStream {
+        val resolved = resolveShareAndPath(server, path) ?: throw IOException("Invalid path: $path")
+        if (resolved.second.isEmpty()) throw IOException("Open a share first")
+        val share = connectShare(server, resolved.first)
+            ?: throw IOException("Could not connect to ${server.host}/${resolved.first}")
+        try {
+            val file = share.openFile(
+                resolved.second,
+                EnumSet.of(AccessMask.GENERIC_WRITE),
+                EnumSet.of(FileAttributes.FILE_ATTRIBUTE_NORMAL),
+                SMB2ShareAccess.ALL,
+                SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                null
+            )
+            return SmbOutput(share, file, file.outputStream)
+        } catch (e: Exception) {
+            try {
+                share.close()
+            } catch (_: Exception) {
+            }
+            throw IOException(e.message ?: "Could not create the file", e)
+        }
+    }
+
+    fun mkdir(server: SmbServer, path: String) {
+        val resolved = resolveShareAndPath(server, path) ?: throw IOException("Invalid path: $path")
+        if (resolved.second.isEmpty()) throw IOException("Open a share first")
+        val share = connectShare(server, resolved.first)
+            ?: throw IOException("Could not connect to ${server.host}/${resolved.first}")
+        try {
+            share.mkdir(resolved.second.replace('/', '\\'))
+        } finally {
+            try {
+                share.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    fun deletePath(server: SmbServer, path: String, isDirectory: Boolean) {
+        val resolved = resolveShareAndPath(server, path) ?: throw IOException("Invalid path: $path")
+        if (resolved.second.isEmpty()) throw IOException("A share cannot be deleted")
+        val share = connectShare(server, resolved.first)
+            ?: throw IOException("Could not connect to ${server.host}/${resolved.first}")
+        try {
+            val clean = resolved.second.replace('/', '\\')
+            if (isDirectory) share.rmdir(clean, true) else share.rm(clean)
+        } finally {
+            try {
+                share.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** Moves or renames inside one share (the fast path for "cut and paste" on the same server). */
+    fun movePath(server: SmbServer, oldPath: String, newPath: String) {
+        val from = resolveShareAndPath(server, oldPath) ?: throw IOException("Invalid path: $oldPath")
+        val to = resolveShareAndPath(server, newPath) ?: throw IOException("Invalid path: $newPath")
+        if (from.first != to.first) throw IOException("Items cannot be moved between shares directly")
+        val share = connectShare(server, from.first)
+            ?: throw IOException("Could not connect to ${server.host}/${from.first}")
+        try {
+            val cleanOld = from.second.replace('/', '\\')
+            val cleanNew = to.second.replace('/', '\\')
+            val entry = try {
+                share.openFile(
+                    cleanOld,
+                    EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE),
+                    null,
+                    SMB2ShareAccess.ALL,
+                    SMB2CreateDisposition.FILE_OPEN,
+                    null
+                )
+            } catch (_: Exception) {
+                share.openDirectory(
+                    cleanOld,
+                    EnumSet.of(AccessMask.DELETE, AccessMask.GENERIC_WRITE),
+                    null,
+                    SMB2ShareAccess.ALL,
+                    SMB2CreateDisposition.FILE_OPEN,
+                    null
+                )
+            }
+            try {
+                entry.rename(cleanNew)
+            } finally {
+                try {
+                    entry.close()
+                } catch (_: Exception) {
+                }
+            }
+        } finally {
+            try {
+                share.close()
+            } catch (_: Exception) {
+            }
         }
     }
 

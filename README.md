@@ -4,6 +4,15 @@
 
 Hamina lets you browse video and photo files on Windows PCs and other SMB2/3 shares over your local network, using an Android TV remote.
 
+## Changes in 1.5.0
+
+- Fixed the build error of 1.4.0 (`setSpeed` clashed with the `speed` property in the player).
+- Storage row on the home screen: internal storage and attached USB drives / SD cards, with free space. They can be browsed, played and viewed like an SMB server. USB drives that are plugged in or removed show up automatically.
+- File actions (hold OK on a file or folder, press Menu, or use the Actions button): copy, cut (move), paste, rename, delete, new folder, and marking several items. Works inside SMB, inside local storage and between the two (for example USB to SMB).
+- Copy, move and delete run in the background with a progress bar at the top of the screen (percentage, size, speed, cancel). You can keep browsing; operations are queued. Moves inside one place are instant renames.
+- Storage access: Android 11+ needs "All files access". If the TV has no settings page for it, the app shows the ADB command to grant it.
+- Speed: thumbnail work waits until the folder list is on screen. The photo viewer shows the cached thumbnail at once, keeps the next photos in the direction of travel decoded, and cancels work that is no longer needed.
+
 ## Changes in 1.4.0
 
 - Thumbnails: images show a thumbnail in the grid and list; videos get a preview frame once they are focused (and keep it afterwards). Folders and file lists load first; thumbnails are created in the background (at most a few files at a time), cached on disk and in memory, and requests are dropped when you scroll past.

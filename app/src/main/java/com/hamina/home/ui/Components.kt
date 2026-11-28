@@ -108,6 +108,7 @@ fun FocusSurface(
     onMenuKey: (() -> Unit)? = null,
     onLeftKey: (() -> Unit)? = null,
     onRightKey: (() -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
     content: @Composable BoxScope.(focused: Boolean) -> Unit
 ) {
@@ -125,6 +126,7 @@ fun FocusSurface(
         label = "focusBackground"
     )
     val interactionSource = remember { MutableInteractionSource() }
+    val longPressFired = remember { BooleanArray(1) }
 
     Box(
         modifier = modifier
@@ -144,14 +146,31 @@ fun FocusSurface(
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onPreviewKeyEvent { event ->
                 val code = event.nativeKeyEvent.keyCode
-                if (code == AndroidKeyEvent.KEYCODE_DPAD_LEFT && onLeftKey != null) {
+                val isOk = code == AndroidKeyEvent.KEYCODE_DPAD_CENTER ||
+                    code == AndroidKeyEvent.KEYCODE_ENTER
+                if (isOk && onLongClick != null) {
+                    // Holding OK opens the actions; a short press clicks (on key up).
+                    if (event.type == KeyEventType.KeyDown) {
+                        if (event.nativeKeyEvent.repeatCount >= 1 && !longPressFired[0]) {
+                            longPressFired[0] = true
+                            onLongClick()
+                        }
+                    } else if (event.type == KeyEventType.KeyUp) {
+                        if (longPressFired[0]) {
+                            longPressFired[0] = false
+                        } else if (ClickGuard.allow()) {
+                            onClick()
+                        }
+                    }
+                    true
+                } else if (code == AndroidKeyEvent.KEYCODE_DPAD_LEFT && onLeftKey != null) {
                     if (event.type == KeyEventType.KeyDown) onLeftKey()
                     true
                 } else if (code == AndroidKeyEvent.KEYCODE_DPAD_RIGHT && onRightKey != null) {
                     if (event.type == KeyEventType.KeyDown) onRightKey()
                     true
                 } else if (event.type == KeyEventType.KeyUp) {
-                    when (event.nativeKeyEvent.keyCode) {
+                    when (code) {
                         AndroidKeyEvent.KEYCODE_DPAD_CENTER,
                         AndroidKeyEvent.KEYCODE_ENTER -> {
                             if (ClickGuard.allow()) onClick()
